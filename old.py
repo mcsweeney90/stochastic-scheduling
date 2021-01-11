@@ -856,7 +856,7 @@ class DAG:
         gpu_exp = sum(task.GPU_cost.mu for task in self.DAG)
         return min(cpu_exp, gpu_exp)
                    
-    def     (self, platform, avg_type="HEFT", cost_type="expected", return_rank_values=False):
+    def sort_by_upward_rank(self, platform, avg_type="HEFT", cost_type="expected", return_rank_values=False):
         """
         Sorts all tasks in the DAG by decreasing/non-increasing order of upward rank.
         

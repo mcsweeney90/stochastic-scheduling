@@ -10,7 +10,7 @@ import numpy as np
 import itertools as it
 from timeit import default_timer as timer
 sys.path.append('../../') 
-from src import RV, TDAG
+from src import TDAG, RV
 
 # # Source for topologies.
 # topologies = 'cholesky-topologies'
@@ -34,8 +34,7 @@ from src import RV, TDAG
 #                 var = np.var(timings[nb][adt][task_type][d])
 #                 weights[nb][adt][task_type][d] = RV(mu, var)
 
-# for name in range(5, 31, 5):    
-# # for name in os.listdir(topologies):
+# for name in range(5, 21, 5):   
 #     print("\n{}".format(name))
 #     with open('{}/{}.dill'.format(topologies, name), 'rb') as file:
 #         G = dill.load(file)
@@ -62,7 +61,7 @@ from src import RV, TDAG
 #                         parent_type = p[0]
 #                         C[ids[p]][ids[t]]['weight'] = {}
 #                         for s, d in it.product(range(nc), range(nc)):
-#                             C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0 #if s == d else weights[nb][adt][task_type]["CC"]  
+#                             C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0  
 #                         for s, d in it.product(range(nc), range(nc, nc + ng)):
 #                             C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["CG"] 
 #                         for s, d in it.product(range(nc, nc + ng), range(nc)):
@@ -73,16 +72,17 @@ from src import RV, TDAG
 #                 with open('{}/{}{}{}.dill'.format(full_dest, name, adt, nb), 'wb') as handle: # name[:-5]
 #                     dill.dump(S, handle)
 
-with open('../cholesky/single/5N128.dill', 'rb') as file:
+with open('../cholesky/single/10N128.dill', 'rb') as file:
     G = dill.load(file)
 start = timer()
-S = G.get_average_schedule(heuristic="HEFT")
+S = G.get_averaged_graph(stochastic=True, avg_type="NORMAL")
+L = S.corLCA()
 # A = G.get_average_graph()
 # pi, _ = A.HEFT(weighted=False)                        
 # print(pi)
 elapsed = timer() - start
 print("This took {} seconds".format(elapsed))
-print(len(S.graph))
+print(L[S.top_sort[-1]])
                     
                 
                 
