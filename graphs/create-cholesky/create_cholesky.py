@@ -72,17 +72,29 @@ from src import TDAG, RV
 #                 with open('{}/{}{}{}.dill'.format(full_dest, name, adt, nb), 'wb') as handle: # name[:-5]
 #                     dill.dump(S, handle)
 
-with open('../cholesky/single/10N128.dill', 'rb') as file:
+with open('../cholesky/single/5N128.dill', 'rb') as file:
     G = dill.load(file)
-start = timer()
-S = G.get_averaged_graph(stochastic=True, avg_type="NORMAL")
-L = S.corLCA()
-# A = G.get_average_graph()
-# pi, _ = A.HEFT(weighted=False)                        
-# print(pi)
-elapsed = timer() - start
-print("This took {} seconds".format(elapsed))
-print(L[S.top_sort[-1]])
+A = G.get_averaged_graph(stochastic=True, avg_type="NORMAL")
+for t in A.graph:
+    print("\n{}".format(t))
+    for p in A.graph.predecessors(t):
+        print(p)
+# start = timer()
+# U = A.get_upward_ranks(method="MC")
+# elapsed = timer() - start
+# print("This took {} seconds".format(elapsed))
+# # print(U[A.top_sort[0]])
+# print(A.sculli()[A.top_sort[-1]])
+# print(A.corLCA()[A.top_sort[-1]])
+# print(np.var(U[A.top_sort[0]]))
+
+# pi = G.get_averaged_schedule()
+# US = pi.get_upward_ranks(method="S")
+# UC = pi.get_upward_ranks(method="C")
+# print(US[pi.top_sort[0]])
+# print(UC[pi.top_sort[0]])
+
+
                     
                 
                 

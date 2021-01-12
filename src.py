@@ -187,6 +187,175 @@ class SDAG:
         self.graph = graph
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
+        
+    def longest_path(self, method="S", mc_dist="GAMMA", mc_samples=1000, full=False):
+        """
+        Evaluate the longest path through the entire DAG.
+        MC:
+        TODO: Better way to determine memory limit?
+        TODO: no check if positive for normal and uniform!
+        """
+        
+        if method in ["S", "s", "SCULLI", "sculli", "Sculli"]:
+            L = {}
+            for t in self.top_sort:
+                parents = list(self.graph.predecessors(t))
+                try:
+                    p = parents[0]
+                    m = self.graph[p][t]['weight'] + L[p] 
+                    for p in parents[1:]:
+                        m1 = self.graph[p][t]['weight'] + L[p]
+                        m = clark(m, m1, rho=0)
+                    L[t] = m + self.graph.nodes[t]['weight']
+                except IndexError:  # Entry task.
+                    L[t] = self.graph.nodes[t]['weight']             
+            return L[self.top_sort[-1]] if not full else L
+        
+        elif method in ["C", "c", "CORLCA", "CorLCA", "corLCA"]:
+            L, V, dominant_ancestors = {}, {}, {}
+            for t in self.top_sort:     # Traverse the DAG in topological order. 
+                nw = self.graph.nodes[t]['weight']
+                dom_parent = None 
+                for parent in self.graph.predecessors(t):
+                    pst = self.graph[parent][t]['weight'] + L[parent]   
+                                        
+                    # First parent.
+                    if dom_parent is None:
+                        dom_parent = parent 
+                        dom_parent_ancs = set(dominant_ancestors[dom_parent])
+                        dom_parent_sd = V[dom_parent]
+                        try:
+                            dom_parent_sd += self.graph[dom_parent][t]['weight'].var
+                        except AttributeError:
+                            pass
+                        dom_parent_sd = sqrt(dom_parent_sd) 
+                        st = pst
+                        
+                    # At least two parents, so need to use Clark's equations to compute eta.
+                    else:                    
+                        # Find the lowest common ancestor of the dominant parent and the current parent.
+                        for a in reversed(dominant_ancestors[parent]):
+                            if a in dom_parent_ancs:
+                                lca = a
+                                break
+                            
+                        # Estimate the relevant correlation.
+                        parent_sd = V[parent]
+                        try:
+                            parent_sd += self.graph[parent][t]['weight'].var
+                        except AttributeError:
+                            pass
+                        parent_sd = sqrt(parent_sd) 
+                        r = V[lca] / (dom_parent_sd * parent_sd)
+                            
+                        # Find dominant parent for the maximization.
+                        if pst.mu > st.mu: 
+                            dom_parent = parent
+                            dom_parent_ancs = set(dominant_ancestors[parent])
+                            dom_parent_sd = parent_sd
+                        
+                        # Compute eta.
+                        st = clark(st, pst, rho=r)  
+                
+                if dom_parent is None: # Entry task...
+                    L[t] = nw  
+                    V[t] = nw.var
+                    dominant_ancestors[t] = [t]
+                else:
+                    L[t] = nw + st 
+                    V[t] = dom_parent_sd**2 + nw.var
+                    dominant_ancestors[t] = dominant_ancestors[dom_parent] + [t] 
+            return L[self.top_sort[-1]] if not full else L
+        
+        elif method in ["MC", "mc", "MONTE CARLO", "Monte Carlo", "monte carlo"]:
+            mem_limit = virtual_memory().available // 10 # Size of numpy random array ~ 8 * samples
+            if self.size*mc_samples < mem_limit:        
+                L = {}
+                for t in self.top_sort:
+                    m, s = self.graph.nodes[t]['weight'].mu, self.graph.nodes[t]['weight'].sd
+                    if mc_dist in ["N", "NORMAL", "normal"]:  
+                        w = np.random.normal(m, s, mc_samples)
+                    elif mc_dist in ["G", "GAMMA", "gamma"]:
+                        v = self.graph.nodes[t]['weight'].var
+                        sh, sc = (m * m)/v, v/m
+                        w = np.random.gamma(sh, sc, mc_samples)
+                    elif mc_dist in ["U", "UNIFORM", "uniform"]:
+                        u = sqrt(3) * s
+                        w = np.random.uniform(-u + m, u + m, mc_samples) 
+                    parents = list(self.graph.predecessors(t))
+                    if not parents:
+                        L[t] = w 
+                        continue
+                    pmatrix = []
+                    for p in self.graph.predecessors(t):
+                        try:
+                            m, s = self.graph[p][t]['weight'].mu, self.graph[p][t]['weight'].sd
+                            if mc_dist in ["N", "NORMAL", "normal"]: 
+                                e = np.random.normal(m, s, mc_samples)
+                            elif mc_dist in ["G", "GAMMA", "gamma"]:
+                                v = self.graph[p][t]['weight'].var
+                                sh, sc = (m * m)/v, v/m
+                                e = np.random.gamma(sh, sc, mc_samples)
+                            elif mc_dist in ["U", "UNIFORM", "uniform"]:
+                                u = sqrt(3) * s
+                                e = np.random.uniform(-u + m, u + m, mc_samples)  
+                            pmatrix.append(np.add(L[p], e))
+                        except AttributeError:
+                            pmatrix.append(L[p])
+                    st = np.amax(pmatrix, axis=0)
+                    L[t] = np.add(w, st)
+                return L[self.top_sort[-1]] if not full else L  # TODO: recursion doesn't work with full == True.
+            else:
+                E = []
+                mx_samples = mem_limit//self.size
+                runs = mc_samples//mx_samples
+                extra = mc_samples % mx_samples
+                for _ in range(runs):
+                    E += list(self.longest_path(method="MC", mc_samples=mx_samples, mc_dist=mc_dist))
+                E += list(self.longest_path(method="MC", mc_samples=extra, mc_dist=mc_dist))
+                return E # TODO: Doesn't work with full == True.
+            
+    def get_upward_ranks(self, method="S", mc_dist="GAMMA", mc_samples=1000):
+        """
+        
+        Parameters
+        ----------
+        method : TYPE, optional
+            DESCRIPTION. The default is "S".
+        mc_dist : TYPE, optional
+            DESCRIPTION. The default is "GAMMA".
+        mc_samples : TYPE, optional
+            DESCRIPTION. The default is 1000.
+
+        Returns
+        -------
+        None.
+
+        """    
+        
+        R = SDAG(self.graph.reverse())
+        return R.longest_path(method=method, mc_dist=mc_dist, mc_samples=mc_samples, full=True)
+        
+        # if method in ["S", "s", "SCULLI", "sculli", "Sculli"]:
+        #     U = {}
+        #     backward_traversal = list(reversed(self.top_sort)) 
+        #     for t in backward_traversal:
+        #         children = list(self.graph.successors(t))
+        #         try:
+        #             s = children[0]
+        #             m = self.graph[t][s]['weight'] + U[s] 
+        #             for s in children[1:]:
+        #                 m1 = self.graph[t][s]['weight'] + U[s]
+        #                 m = clark(m, m1, rho=0)
+        #             U[t] = m + self.graph.nodes[t]['weight'] 
+        #         except IndexError:  # Entry task.
+        #             U[t] = self.graph.nodes[t]['weight'] 
+        #     return U
+        
+    # def reverse_upward_ranks(self):
+    #     R = SDAG(self.graph.reverse())
+    #     U = R.longest_path(full=True)
+    #     return U    
     
     def MC(self, samples, dist="GAMMA"):
         """
