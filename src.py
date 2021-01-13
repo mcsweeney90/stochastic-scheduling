@@ -7,9 +7,11 @@ Stochastic scheduling simulator.
 import random
 import networkx as nx
 import numpy as np
-from scipy.stats import norm
+import itertools as it
 from math import sqrt
 from psutil import virtual_memory
+# from scipy.stats import norm # TODO: really slow but NormalDist only available for version >= 3.8. What to do on Matt's machine?
+from statistics import NormalDist # TODO: see above, not available on Matt's machine.
 
 class RV:
     """
@@ -73,6 +75,8 @@ class RV:
             return self.mu + self.sd
         elif avg_type in ["S", "SHEFT"]: 
             return self.mu + self.sd if self.mu > self.sd else self.mu + (self.sd/self.mu)
+        elif avg_type in ["SD", "sd"]: # TODO: for RobHEFT but necessary?
+            return self.sd
 
 class ADAG:
     """Represents a graph with average node and edge weights."""
@@ -111,8 +115,6 @@ class ADAG:
             except ValueError:
                 pass   
         return ranks  
-    def get_downward_ranks(self):
-        return
     
     def simulate_scheduling(self, priority_list, policy="EFT"):
         """
@@ -175,8 +177,6 @@ class ADAG:
         priority_list = list(sorted(U, key=U.get, reverse=True))
         # Get schedule.
         return self.simulate_scheduling(priority_list=priority_list)      
-    def CPOP(self):
-        return
     def PEFT(self):
         return
 
@@ -194,6 +194,7 @@ class SDAG:
         MC:
         TODO: Better way to determine memory limit?
         TODO: no check if positive for normal and uniform!
+        TODO: recursion doesn't work if full == True.
         """
         
         if method in ["S", "s", "SCULLI", "sculli", "Sculli"]:
@@ -330,245 +331,13 @@ class SDAG:
         Returns
         -------
         None.
-
+        
+        Not the most efficient way of doing this since the entire graph is copied, but the overhead is typically low compared
+        to the cost of the longest path algorithms so this isn't a huge issue.
         """    
         
         R = SDAG(self.graph.reverse())
-        return R.longest_path(method=method, mc_dist=mc_dist, mc_samples=mc_samples, full=True)
-        
-        # if method in ["S", "s", "SCULLI", "sculli", "Sculli"]:
-        #     U = {}
-        #     backward_traversal = list(reversed(self.top_sort)) 
-        #     for t in backward_traversal:
-        #         children = list(self.graph.successors(t))
-        #         try:
-        #             s = children[0]
-        #             m = self.graph[t][s]['weight'] + U[s] 
-        #             for s in children[1:]:
-        #                 m1 = self.graph[t][s]['weight'] + U[s]
-        #                 m = clark(m, m1, rho=0)
-        #             U[t] = m + self.graph.nodes[t]['weight'] 
-        #         except IndexError:  # Entry task.
-        #             U[t] = self.graph.nodes[t]['weight'] 
-        #     return U
-        
-    # def reverse_upward_ranks(self):
-    #     R = SDAG(self.graph.reverse())
-    #     U = R.longest_path(full=True)
-    #     return U    
-    
-    def MC(self, samples, dist="GAMMA"):
-        """
-        Monte Carlo method to estimate the longest path distribution. 
-        Vectorized numpy version which is much faster than the serial approach but definitely a memory hog!
-        TODO: Better way to determine memory limit?
-        TODO: no check if positive for normal and uniform!
-        TODO: modify to determine upward ranks for task prioritization?
-        """
-        
-        # Check if sufficient memory to do entire sampling in single 
-        # mem_limit = 1800000000 # TODO: estimate this somehow.  
-        mem_limit = virtual_memory().available // 10 # Size of numpy random array ~ 8 * samples
-        if self.size*samples < mem_limit:        
-            L = {}
-            for t in self.top_sort:
-                m, s = self.graph.nodes[t]['weight'].mu, self.graph.nodes[t]['weight'].sd
-                if dist in ["N", "NORMAL", "normal"]:  
-                    w = np.random.normal(m, s, samples)
-                elif dist in ["G", "GAMMA", "gamma"]:
-                    v = self.graph.nodes[t]['weight'].var
-                    sh, sc = (m * m)/v, v/m
-                    w = np.random.gamma(sh, sc, samples)
-                elif dist in ["U", "UNIFORM", "uniform"]:
-                    u = sqrt(3) * s
-                    w = np.random.uniform(-u + m, u + m, samples) 
-                parents = list(self.graph.predecessors(t))
-                if not parents:
-                    L[t] = w 
-                    continue
-                pmatrix = []
-                for p in self.graph.predecessors(t):
-                    try:
-                        m, s = self.graph[p][t]['weight'].mu, self.graph[p][t]['weight'].sd
-                        if dist in ["N", "NORMAL", "normal"]: 
-                            e = np.random.normal(m, s, samples)
-                        elif dist in ["G", "GAMMA", "gamma"]:
-                            v = self.graph[p][t]['weight'].var
-                            sh, sc = (m * m)/v, v/m
-                            e = np.random.gamma(sh, sc, samples)
-                        elif dist in ["U", "UNIFORM", "uniform"]:
-                            u = sqrt(3) * s
-                            e = np.random.uniform(-u + m, u + m, samples)  
-                        pmatrix.append(np.add(L[p], e))
-                    except AttributeError:
-                        pmatrix.append(L[p])
-                st = np.amax(pmatrix, axis=0)
-                L[t] = np.add(w, st)
-            return L[self.top_sort[-1]] 
-        else:
-            E = []
-            mx_samples = mem_limit//self.size
-            runs = samples//mx_samples
-            extra = samples % mx_samples
-            for _ in range(runs):
-                E += list(self.MC(samples=mx_samples, dist=dist))
-            E += list(self.MC(samples=extra, dist=dist))
-            return E       
-
-    def sculli(self, direction="downward"):
-        """
-        Sculli's method for estimating the makespan of a fixed-cost stochastic DAG.
-        'The completion time of PERT networks,'
-        Sculli (1983).  
-        TODO: upward doesn't include current task cost, which is reverse of convention elsewhere.
-        """
-        
-        L = {}
-        if direction == "downward":
-            for t in self.top_sort:
-                parents = list(self.graph.predecessors(t))
-                try:
-                    p = parents[0]
-                    m = self.graph[p][t]['weight'] + L[p] 
-                    for p in parents[1:]:
-                        m1 = self.graph[p][t]['weight'] + L[p]
-                        m = clark(m, m1, rho=0)
-                    L[t] = m + self.graph.nodes[t]['weight']
-                except IndexError:  # Entry task.
-                    L[t] = self.graph.nodes[t]['weight']  
-        elif direction == "upward":
-            backward_traversal = list(reversed(self.top_sort)) 
-            for t in backward_traversal:
-                children = list(self.graph.successors(t))
-                try:
-                    s = children[0]
-                    m = self.graph[t][s]['weight'] + self.graph.nodes[s]['weight'] + L[s] 
-                    for s in children[1:]:
-                        m1 = self.graph[t][s]['weight'] + self.graph.nodes[s]['weight'] + L[s]
-                        m = clark(m, m1, rho=0)
-                    L[t] = m  
-                except IndexError:  # Entry task.
-                    L[t] = 0.0   
-        return L            
-    
-    def corLCA(self, direction="D", return_correlation_info=False):
-        """
-        CorLCA heuristic for estimating the makespan of a fixed-cost stochastic DAG.
-        'Correlation-aware heuristics for evaluating the distribution of the longest path length of a DAG with random weights,' 
-        Canon and Jeannot (2016).     
-        Assumes single entry and exit tasks. TODO: could be an issue when evaluating partial DAGs during simulated scheduling, keep an eye. 
-        This is a fast version that doesn't explicitly construct the correlation tree.
-        TODO: make sure upward version works. Add a parameter to control whether or not upward includes current task?
-        """    
-        
-        # Dominant ancestors dict used instead of DiGraph for the common ancestor queries. 
-        # L represents longest path estimates. V[task ID] = variance of longest path of dominant ancestors (used to estimate rho).
-        dominant_ancestors, L, V = {}, {}, {}
-        
-        if direction in ["D", "d", "downward", "DOWNWARD"]:      
-            for t in self.top_sort:     # Traverse the DAG in topological order. 
-                nw = self.graph.nodes[t]['weight']
-                dom_parent = None 
-                for parent in self.graph.predecessors(t):
-                    pst = self.graph[parent][t]['weight'] + L[parent]   
-                                        
-                    # First parent.
-                    if dom_parent is None:
-                        dom_parent = parent 
-                        dom_parent_ancs = set(dominant_ancestors[dom_parent])
-                        dom_parent_sd = V[dom_parent]
-                        try:
-                            dom_parent_sd += self.graph[dom_parent][t]['weight'].var
-                        except AttributeError:
-                            pass
-                        dom_parent_sd = sqrt(dom_parent_sd) 
-                        st = pst
-                        
-                    # At least two parents, so need to use Clark's equations to compute eta.
-                    else:                    
-                        # Find the lowest common ancestor of the dominant parent and the current parent.
-                        for a in reversed(dominant_ancestors[parent]):
-                            if a in dom_parent_ancs:
-                                lca = a
-                                break
-                            
-                        # Estimate the relevant correlation.
-                        parent_sd = V[parent]
-                        try:
-                            parent_sd += self.graph[parent][t]['weight'].var
-                        except AttributeError:
-                            pass
-                        parent_sd = sqrt(parent_sd) 
-                        r = V[lca] / (dom_parent_sd * parent_sd)
-                            
-                        # Find dominant parent for the maximization.
-                        if pst.mu > st.mu: 
-                            dom_parent = parent
-                            dom_parent_ancs = set(dominant_ancestors[parent])
-                            dom_parent_sd = parent_sd
-                        
-                        # Compute eta.
-                        st = clark(st, pst, rho=r)  
-                
-                if dom_parent is None: # Entry task...
-                    L[t] = nw  
-                    V[t] = nw.var
-                    dominant_ancestors[t] = [t]
-                else:
-                    L[t] = nw + st 
-                    V[t] = dom_parent_sd**2 + nw.var
-                    dominant_ancestors[t] = dominant_ancestors[dom_parent] + [t] 
-                    
-        elif direction in ["U", "u", "UPWARD", "upward"]:
-            backward_traversal = list(reversed(self.top_sort)) 
-            for t in backward_traversal:    
-                dom_child = None 
-                for child in self.graph.successors(t):
-                    cw = self.graph.nodes[child]['weight']
-                    cst = self.graph[t][child]['weight'] + cw + L[child]  
-                    if dom_child is None:
-                        dom_child = child 
-                        dom_child_descs = set(dominant_ancestors[dom_child])
-                        dom_child_sd = V[dom_child] + self.graph.nodes[dom_child]['weight'].var
-                        try:
-                            dom_child_sd += self.graph[t][dom_child]['weight'].var
-                        except AttributeError:
-                            pass
-                        dom_child_sd = sqrt(dom_child_sd) 
-                        st = cst
-                    else: 
-                        for a in reversed(dominant_ancestors[child]):
-                            if a in dom_child_descs:
-                                lca = a
-                                break
-                        child_sd = V[child] + self.graph.nodes[child]['weight'].var 
-                        try:
-                            child_sd += self.graph[t][child]['weight'].var
-                        except AttributeError:
-                            pass
-                        child_sd = sqrt(child_sd) 
-                        # Find LCA task. TODO: don't like this, rewrite so not necessary.
-                        for s in self.top_sort:
-                            if s == lca:
-                                lca_var = self.graph.nodes[s]['weight'].var  
-                                break
-                        r = (V[lca] + lca_var) / (dom_child_sd * child_sd) 
-                        if cst.mu > st.mu: 
-                            dom_child = child
-                            dom_child_descs = set(dominant_ancestors[child])
-                            dom_child_sd = child_sd
-                        st = clark(st, cst, rho=r)  
-                if dom_child is None: # Entry task...
-                    L[t], V[t] = 0.0, 0.0
-                    dominant_ancestors[t] = [t]
-                else:
-                    L[t] = st 
-                    V[t] = dom_child_sd**2 
-                    dominant_ancestors[t] = dominant_ancestors[dom_child] + [t]            
-        
-        if return_correlation_info:
-            return L, dominant_ancestors, V
-        return L        
+        return R.longest_path(method=method, mc_dist=mc_dist, mc_samples=mc_samples, full=True)       
                
 class TDAG:
     """Represents a graph with stochastic node and edge weights."""
@@ -614,27 +383,28 @@ class TDAG:
                 A[t][s]['weight'] = stochastic_average(self.graph[t][s]['weight'].values(), avg_type=avg_type)
         return SDAG(A)
     
-    def get_averaged_schedule(self, heuristic="HEFT", avg_type="MEAN", avg_graph=None):
+    def schedule_to_graph(self, schedule, where_scheduled=None):
         """
-        Compute a schedule using average costs.
-        Scheduled returned in the form of a graph with stochastic costs.
-        TODO: assumes sequential/fullahead schedule, how to handle assignment case?
-        """
-        # Construct the (scalar) "average" graph.
-        if avg_graph is None:
-            avg_graph = self.get_averaged_graph(avg_type=avg_type)
+        Convert schedule into a graph with stochastic weights whose longest path gives the makespan.
         
-        # Apply specified heuristic. TODO: would ideally like to pass ADAG method as parameter. 
-        if heuristic == "HEFT": 
-            pi, where_scheduled = avg_graph.HEFT()
-        elif heuristic == "HEFT-WM":
-            pi, where_scheduled = avg_graph.HEFT(weighted=True)
-        elif heuristic == "CPOP":
-            pi, where_scheduled = avg_graph.CPOP()
-        elif heuristic == "PEFT":
-            pi, where_scheduled = avg_graph.PEFT()
-        else:
-            raise ValueError("Invalid heuristic type specified!")
+        Parameters
+        ----------
+        schedule : TYPE
+            DESCRIPTION.
+        where : TYPE, optional
+            DESCRIPTION. The default is None.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        if where_scheduled is None:
+            where_scheduled = {}
+            for w, load in schedule.items():
+                for t in list(s[0] for s in load):
+                    where_scheduled[t] = w 
         
         # Construct and return the schedule graph.
         S = self.graph.__class__()
@@ -648,19 +418,41 @@ class TDAG:
                 w1 = where_scheduled[s]
                 S[t][s]['weight'] = self.graph[t][s]['weight'][(w, w1)] 
             # Add disjunctive edge if necessary.
-            idx = list(r[0] for r in pi[w]).index(t)
+            idx = list(r[0] for r in schedule[w]).index(t)
             if idx > 0:
-                d = pi[w][idx - 1][0]
+                d = schedule[w][idx - 1][0]
                 if not S.has_edge(d, t):
                     S.add_edge(d, t)
                     S[d][t]['weight'] = 0.0
         return SDAG(S) 
     
-    def SDLS(self):
+    def get_averaged_schedule(self, heuristic="HEFT", avg_type="MEAN", avg_graph=None):
         """
-        TODO: SDLS only computes an assignment, rather than a fullahead/strategy schedule. In previous implementation,
-        used simple extension of Sculli's method with insertion based on mean values to obtain a task ordering. But original
-        paper assumes no insertion, so maybe just go with that?        
+        Compute a schedule using average costs.
+        Scheduled returned in the form of a graph with stochastic costs.
+        TODO: assumes sequential/fullahead schedule, how to handle assignment case?
+        """
+        # Construct the (scalar) "average" graph.
+        if avg_graph is None:
+            avg_graph = self.get_averaged_graph(avg_type=avg_type)
+        
+        # Apply specified heuristic. TODO: would ideally like to pass ADAG method as parameter. 
+        if heuristic == "HEFT": 
+            pi, where = avg_graph.HEFT()
+        elif heuristic == "HEFT-WM":
+            pi, where = avg_graph.HEFT(weighted=True)
+        elif heuristic == "PEFT":
+            pi, where = avg_graph.PEFT()
+        else:
+            raise ValueError("Invalid heuristic type specified!")
+        
+        return self.schedule_to_graph(schedule=pi, where_scheduled=where)
+    
+    def SDLS(self, X=0.9, return_graph=True):
+        """
+        TODO: Insertion.
+        TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
+        real bottlenecks.
 
         Returns
         -------
@@ -669,14 +461,107 @@ class TDAG:
         """
         # Convert to stochastic averaged graph.
         S = self.get_averaged_graph(stochastic=True, avg_type="NORMAL")
+        
         # Get upward ranks.
-        U = S.sculli(direction="upward") # TODO: include task cost. Maybe create another function for all stochastic UR choices?
-        # Compute deltas.
-        # TODO: how to handle insertion - look at old code and original paper.
-        # 
-        # TODO: should this be an SDAG method?
-        return
-    def RobHEFT(self):
+        B = S.get_upward_ranks(method="S") # Upward ranks computed via Sculli's method.
+        
+        # Compute the schedule.
+        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())    # Useful.
+        ready_tasks = [self.top_sort[0]]    # Assumes single entry task.   
+        SDL, FT, where = {}, {}, {}
+        schedule = {w : [] for w in workers}   
+        while len(ready_tasks): 
+            for task in ready_tasks:
+                avg_weight = stochastic_average(self.graph.nodes[task]['weight'].values(), avg_type="NORMAL") # TODO: check. 
+                parents = list(self.graph.predecessors(task))
+                for w in workers:
+                    # Compute delta.
+                    delta = avg_weight - self.graph.nodes[task]['weight'][w]    
+                    
+                    # Compute earliest start time. 
+                    if not parents: # Single entry task.
+                        EST = 0.0
+                    else:
+                        p = parents[0]
+                        # Compute DRT - start time without considering processor contention.
+                        drt = FT[p] + self.graph[p][task]['weight'][(where[p], w)]
+                        for p in parents[1:]:
+                            q = FT[p] + self.graph[p][task]['weight'][(where[p], w)]
+                            drt = clark(drt, q, rho=0)
+                        # Find the earliest time task can be scheduled on the worker.
+                        if not schedule[w]: # No tasks scheduled on worker. TODO: insertion.
+                            EST = drt
+                        else:
+                            EST = clark(drt, schedule[w][-1][2], rho=0)
+                                                         
+                    # Compute SDL.
+                    SDL[(task, w)] = (B[task] - EST + delta, EST)    # Returns EST to prevent having to recalculate it later but a bit ugly.
+                
+            # Select the maximum pair. TODO: bit much for a one liner? Make sure it works...
+            # chosen_task, chosen_worker = max(it.product(ready_tasks, workers), key=lambda pr : norm.ppf(X, SDL[pr][0].mu, SDL[pr][0].sd))
+            chosen_task, chosen_worker = max(it.product(ready_tasks, workers), 
+                                              key=lambda pr : NormalDist(SDL[pr][0].mu, SDL[pr][0].sd).inv_cdf(X))
+                    
+            # Schedule the chosen task on the chosen worker. 
+            where[chosen_task] = chosen_worker
+            FT[chosen_task] = SDL[(chosen_task, chosen_worker)][1] + self.graph.nodes[chosen_task]['weight'][chosen_worker]
+            schedule[chosen_worker].append((chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task])) 
+            
+            ready_tasks.remove(chosen_task)
+            for c in self.graph.successors(chosen_task):
+                if all(p in where for p in self.graph.predecessors(c)):
+                    ready_tasks.append(c)   
+                    
+        # If necessary, convert schedule to graph.
+        if return_graph:
+            return self.schedule_to_graph(schedule, where_scheduled=where)
+        return schedule    
+    
+    def RobHEFT(self, a=45):
+        """
+        RobHEFT (HEFT with robustness) heuristic.
+        'Evaluation and optimization of the robustness of DAG schedules in heterogeneous environments,'
+        Canon and Jeannot (2010). 
+        """
+        
+        # Get priority list of tasks.
+        A1 = self.get_averaged_graph(avg_type="MEAN")
+        A2 = self.get_averaged_graph(avg_type="SD")
+        UM = A1.get_upward_ranks()
+        mmx = max(UM.values()) # 
+        US = A2.get_upward_ranks()
+        smx = max(US.values())
+        U = {t : a * (UM[t]/mmx) + (90 - a) * (US[t]/smx) for t in self.top_sort}
+        priority_list = list(sorted(self.top_sort, key=U.get)) # TODO: ascending or descending?
+        
+        pi = nx.DiGraph()   # TODO: copy here and set all weights to 0.0?
+        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())    # Useful.   
+        where = {}
+        last = {w : 0 for w in workers}
+        for task in priority_list:
+            parents = list(self.graph.predecessors(task))
+            for w in workers:
+                # Set schedule node weights.
+                pi.graph.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
+                # Same for edges.
+                for p in parents:
+                    pi.graph[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
+                # TODO: Add the transitive edge if necessary.
+                x = 0
+                # TODO: Compute longest path using either CorLCA or MC.
+                y = 0
+                # Add to e.g. worker_finish_times.
+                # Clean up - remove edge etc.
+            # Select the "best" worker according to the aggregation/angle procedure.
+                
+                
+            
+            
+            
+            
+        
+        
+        
         return
     
 # =============================================================================
@@ -687,7 +572,7 @@ def stochastic_average(RVs, avg_type="NORMAL"):
     """Return an RV representing the average of a set of RVs (and possibly scalar zeros)."""
     
     # Check if all RVs are actually floats/0.0. Not ideal but necessary...
-    if all((type(r) == float or type(r) == int)for r in RVs):
+    if all((type(r) == float or type(r) == int) for r in RVs):
         return 0.0
     
     if avg_type in ["N", "NORMAL"]:
@@ -705,15 +590,16 @@ def clark(r1, r2, rho=0, minimization=False):
     Returns a new RV representing the maximization of self and other whose mean and variance
     are computed using Clark's equations for the first two moments of the maximization of two normal RVs.
     TODO: minimization from one of Canon's papers, find source and cite.
+    TODO: this is slow because of the calls to norm.pdf and norm.cdf. Is there any way to vectorize/optimize another way?
     See:
     'The greatest of a finite set of random variables,'
     Charles E. Clark (1983).
     """
     a = sqrt(r1.var + r2.var - 2 * r1.sd * r2.sd * rho)     
-    b = (r1.mu - r2.mu) / a            
-    cdf = norm.cdf(b)
-    mcdf = norm.cdf(-b)
-    pdf = norm.pdf(b)   
+    b = (r1.mu - r2.mu) / a           
+    cdf = NormalDist().cdf(b)   #norm.cdf(b)
+    mcdf = 1 - cdf 
+    pdf = NormalDist().pdf(b)   #norm.pdf(b)   
     if minimization:
         mu = r1.mu * mcdf + r2.mu * cdf - a * pdf 
         var = (r1.mu**2 + r1.var) * mcdf
