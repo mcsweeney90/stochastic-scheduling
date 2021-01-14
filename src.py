@@ -183,7 +183,7 @@ class ADAG:
 class SDAG:
     """Represents a graph with stochastic node and edge weights."""
     def __init__(self, graph):
-        """Graph is an NetworkX digraph with RV nodes and edge weights. Usually output by functions elsewhere..."""
+        """Graph is an NetworkX digraph with RV nodes and edge weights. Usually output by functions elsewhere..."""            
         self.graph = graph
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
@@ -524,45 +524,96 @@ class TDAG:
         Canon and Jeannot (2010). 
         """
         
-        # Get priority list of tasks.
-        A1 = self.get_averaged_graph(avg_type="MEAN")
-        A2 = self.get_averaged_graph(avg_type="SD")
-        UM = A1.get_upward_ranks()
-        mmx = max(UM.values()) # 
-        US = A2.get_upward_ranks()
-        smx = max(US.values())
-        U = {t : a * (UM[t]/mmx) + (90 - a) * (US[t]/smx) for t in self.top_sort}
-        priority_list = list(sorted(self.top_sort, key=U.get)) # TODO: ascending or descending?
+        # # Get priority list of tasks.
+        # # TODO: is this what was meant here?
+        # A1 = self.get_averaged_graph(avg_type="MEAN")
+        # A2 = self.get_averaged_graph(avg_type="SD")
+        # UM = A1.get_upward_ranks()
+        # mmx = max(UM.values()) # since single entry/exit tasks could
+        # US = A2.get_upward_ranks()
+        # smx = max(US.values())
+        # U = {t : a * (UM[t]/mmx) + (90 - a) * (US[t]/smx) for t in self.top_sort}
+        # priority_list = list(sorted(self.top_sort, key=U.get)) # TODO: ascending or descending?
         
-        pi = nx.DiGraph()   # TODO: copy here and set all weights to 0.0?
+        A1 = self.get_averaged_graph(avg_type="MEAN")
+        UM = A1.get_upward_ranks()
+        priority_list = list(sorted(self.top_sort, key=UM.get, reverse=True)) # TODO: ascending or descending?
+        # print(priority_list)
+        
+        # Create the schedule graph.
+        # TODO: copy here and set all weights to 0.0?
+        S = self.graph.__class__()       
+        
+        # Simulate and find schedule.
         workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())    # Useful.   
-        where = {}
-        last = {w : 0 for w in workers}
+        where, last = {}, {} # Helpers.
         for task in priority_list:
+            # print("\n{}".format(task))
+            S.add_node(task)
             parents = list(self.graph.predecessors(task))
+            for p in parents:
+                S.add_edge(p, task)
+            worker_makespans = {}
             for w in workers:
-                # Set schedule node weights.
-                pi.graph.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
+                
+                # Set schedule node weights. TODO: add node instead?
+                S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
                 # Same for edges.
                 for p in parents:
-                    pi.graph[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
-                # TODO: Add the transitive edge if necessary.
-                x = 0
+                    S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
+                    
+                # TODO: Add the transitive edge if necessary. What about insertion?
+                remove = False
+                try:
+                    L = last[w]
+                    if not S.has_edge(L, task):
+                        S.add_edge(L, task)
+                        S[L][task]['weight'] = 0.0
+                        remove = True
+                except KeyError:
+                    pass
+                
                 # TODO: Compute longest path using either CorLCA or MC.
-                y = 0
-                # Add to e.g. worker_finish_times.
-                # Clean up - remove edge etc.
+                # Add artificial exit node if necessary. 
+                exit_tasks = [t for t in S if not len(list(S.successors(t)))]
+                if len(exit_tasks) > 1:
+                    S.add_node("X")
+                    S.nodes["X"]['weight'] = RV(0.0, 0.0) # don't like.
+                    for e in exit_tasks:
+                        S.add_edge(e, "X")
+                        S[e]["X"]['weight'] = 0.0 
+                        
+                # TODO: Compute longest path using either CorLCA or MC.
+                pi = SDAG(S)
+                worker_makespans[w]  = pi.longest_path(method="C")
+                
+                # Clean up - remove edge etc. TODO: need to set node weight to zero?
+                if remove:
+                    S.remove_edge(L, task)
+                if len(exit_tasks) > 1:
+                    S.remove_node("X")
+                    
+            # print(worker_makespans)
             # Select the "best" worker according to the aggregation/angle procedure.
-                
-                
-            
-            
-            
-            
-        
-        
-        
-        return
+            # chosen_worker = closest_worker(worker_makespans, a=a)
+            chosen_worker = min(workers, key=lambda w:worker_makespans[w].mu)
+            # print(chosen_worker)
+            # "Schedule" the task on chosen worker.
+            where[task] = chosen_worker
+            S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
+            # Same for edges.
+            for p in parents:
+                S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], chosen_worker)]
+            try:
+                L = last[chosen_worker]
+                if not S.has_edge(L, task):
+                    S.add_edge(L, task)
+                    S[L][task]['weight'] = 0.0
+            except KeyError:
+                pass
+            last[chosen_worker] = task
+       
+        return SDAG(S)
     
 # =============================================================================
 # FUNCTIONS.
@@ -613,7 +664,54 @@ def clark(r1, r2, rho=0, minimization=False):
         var += (r1.mu + r2.mu) * a * pdf
         var -= mu**2         
     return RV(mu, var)  
-         
+    
+     
+def closest_worker(makespans, a=45):
+    """
+    Helper function for RobHEFT.
+
+    Parameters
+    ----------
+    points : TYPE
+        DESCRIPTION.
+    a : TYPE, optional
+        DESCRIPTION. The default is 45.
+
+    Returns
+    -------
+    None.
+
+    """     
+    # Filter the dominated points.   
+    sorted_workers = list(sorted(makespans, key=lambda p : makespans[p].mu)) # Ascending order of expected value.
+    dominated = [False] * len(sorted_workers)           
+    for i, w in enumerate(sorted_workers):
+        if dominated[i]:
+            continue
+        for j, q in enumerate(sorted_workers[:i]):   
+            if dominated[j]:
+                continue
+            if makespans[q].sd < makespans[w].sd:
+                dominated[i] = True 
+    nondominated = {w : makespans[w] for i, w in enumerate(sorted_workers) if not dominated[i]}
+    # print(nondominated)
+        
+    # Find max mean and standard deviation in order to scale them.
+    mxm = max(m.mu for m in makespans.values())
+    mxs = max(m.sd for m in makespans.values())
+    
+    # Convert angle to radians.
+    angle = a * np.pi / 180 
+    # Line segment runs from (0, 0) to (1, tan(a)).
+    line_end_pt = np.tan(angle) 
+    
+    D = {}
+    for w, m in nondominated.items():
+        x, y = m.mu/mxm, m.sd/mxs
+        # Find distance to line.
+        D[w] = abs(line_end_pt * x - y) / sqrt(1 + line_end_pt**2)
+    return min(D, key=D.get)   
+        
         
 
         
