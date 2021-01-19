@@ -87,12 +87,14 @@ class ADAG:
         self.size = len(self.top_sort)
         
     def node_mean(self, task, weighted=False):
+        """TODO."""
         if not weighted:
             return sum(self.graph.nodes[task]['weight'].values())/len(self.graph.nodes[task]['weight'])
         s = sum(1/v for v in self.graph.nodes[task]['weight'].values())
         return len(self.graph.nodes[task]['weight']) / s 
     
     def edge_mean(self, parent, child, weighted=False):
+        """TODO: update, changes to edge weights."""
         if not weighted:
             return sum(self.graph[parent][child]['weight'].values())/len(self.graph[parent][child]['weight']) 
         s1 = sum(1/v for v in self.graph.nodes[parent]['weight'].values())
@@ -102,6 +104,7 @@ class ADAG:
             t_w = self.graph.nodes[parent]['weight'][k[0]]
             c_w = self.graph.nodes[child]['weight'][k[1]]             
             cbar += v/(t_w * c_w) 
+        cbar *= 2 # TODO: check.
         cbar /= (s1 * s2)
         return cbar 
         
@@ -116,6 +119,15 @@ class ADAG:
                 pass   
         return ranks  
     
+    def comm_cost(self, parent, child, source, dest):
+        """TODO."""
+        if source == dest:
+            return 0.0
+        elif source < dest:
+            return self.graph[parent][child]['weight'][(source, dest)]
+        else:
+            return self.graph[parent][child]['weight'][(dest, source)] # symmetric.
+    
     def simulate_scheduling(self, priority_list, policy="EFT"):
         """
         Simulates the scheduling of the tasks in priority_list.
@@ -127,15 +139,13 @@ class ADAG:
         finish_times, where = {}, {}
         # Start the simulation.
         for task in priority_list:
-            # print("\n")
-            # print(task)
             parents = list(self.graph.predecessors(task))
-            # print(list(p for p in parents))
             worker_schedules = {}
             for w in workers:
                 task_cost = self.graph.nodes[task]['weight'][w]
                 # Find the data-ready time.                    
-                drt = 0.0 if not parents else max(finish_times[p] + self.graph[p][task]['weight'][(where[p], w)] for p in parents) 
+                # drt = 0.0 if not parents else max(finish_times[p] + self.graph[p][task]['weight'][(where[p], w)] for p in parents) 
+                drt = 0.0 if not parents else max(finish_times[p] + self.comm_cost(p, task, where[p], w) for p in parents)
                 # Find time worker can actually execute the task.
                 if not schedule[w]:
                     worker_schedules[w] = (drt, drt + task_cost, 0)
@@ -156,12 +166,10 @@ class ADAG:
                     if not found:
                         st = max(schedule[w][-1][2], drt)
                         worker_schedules[w] = (st, st + task_cost, -1)     
-            # print(worker_schedules)
             min_worker = min(workers, key=lambda w:worker_schedules[w][1])
             where[task] = min_worker            
             st, ft, idx = worker_schedules[min_worker]
-            finish_times[task] = ft   
-            # print(finish_times)
+            finish_times[task] = ft  
             # Add to schedule.           
             if not schedule[min_worker] or idx < 0:             
                 schedule[min_worker].append((task, st, ft))  
@@ -191,10 +199,10 @@ class SDAG:
     def longest_path(self, method="S", mc_dist="GAMMA", mc_samples=1000, full=False):
         """
         Evaluate the longest path through the entire DAG.
-        MC:
-        TODO: Better way to determine memory limit?
-        TODO: no check if positive for normal and uniform!
-        TODO: recursion doesn't work if full == True.
+        TODO: Few possible issues with MC method:
+            - Better way to determine memory limit.
+            - Full/exit task only versions make the code unwieldy. Check everything works okay.
+            - Worth ensuring positivity for normal and uniform? Do negative realizations ever occur?
         """
         
         if method in ["S", "s", "SCULLI", "sculli", "Sculli"]:
@@ -275,6 +283,7 @@ class SDAG:
                 for t in self.top_sort:
                     m, s = self.graph.nodes[t]['weight'].mu, self.graph.nodes[t]['weight'].sd
                     if mc_dist in ["N", "NORMAL", "normal"]:  
+                        # w = abs(np.random.normal(m, s, mc_samples))
                         w = np.random.normal(m, s, mc_samples)
                     elif mc_dist in ["G", "GAMMA", "gamma"]:
                         v = self.graph.nodes[t]['weight'].var
@@ -283,6 +292,7 @@ class SDAG:
                     elif mc_dist in ["U", "UNIFORM", "uniform"]:
                         u = sqrt(3) * s
                         w = np.random.uniform(-u + m, u + m, mc_samples) 
+                        # w = abs(np.random.uniform(-u + m, u + m, mc_samples))
                     parents = list(self.graph.predecessors(t))
                     if not parents:
                         L[t] = w 
@@ -293,6 +303,7 @@ class SDAG:
                             m, s = self.graph[p][t]['weight'].mu, self.graph[p][t]['weight'].sd
                             if mc_dist in ["N", "NORMAL", "normal"]: 
                                 e = np.random.normal(m, s, mc_samples)
+                                e = abs(np.random.normal(m, s, mc_samples))
                             elif mc_dist in ["G", "GAMMA", "gamma"]:
                                 v = self.graph[p][t]['weight'].var
                                 sh, sc = (m * m)/v, v/m
@@ -300,23 +311,37 @@ class SDAG:
                             elif mc_dist in ["U", "UNIFORM", "uniform"]:
                                 u = sqrt(3) * s
                                 e = np.random.uniform(-u + m, u + m, mc_samples)  
+                                e = abs(np.random.uniform(-u + m, u + m, mc_samples))
                             pmatrix.append(np.add(L[p], e))
                         except AttributeError:
                             pmatrix.append(L[p])
                     st = np.amax(pmatrix, axis=0)
-                    L[t] = np.add(w, st)
-                return L[self.top_sort[-1]] if not full else L  # TODO: recursion doesn't work with full == True.
+                    L[t] = np.add(w, st) 
+                return L[self.top_sort[-1]] if not full else L  
             else:
-                E = []
+                E = [] if not full else {}
                 mx_samples = mem_limit//self.size
                 runs = mc_samples//mx_samples
                 extra = mc_samples % mx_samples
                 for _ in range(runs):
-                    E += list(self.longest_path(method="MC", mc_samples=mx_samples, mc_dist=mc_dist))
-                E += list(self.longest_path(method="MC", mc_samples=extra, mc_dist=mc_dist))
-                return E # TODO: Doesn't work with full == True.
+                    if full:
+                        L = self.longest_path(method="MC", mc_samples=mx_samples, mc_dist=mc_dist, full=True)
+                        if len(E) == 0:
+                            E = L
+                        else:
+                            for t in self.top_sort:
+                                E[t] += L[t] # TODO: check if this throws an error because L[t] is an np array.
+                    else:   
+                        E += list(self.longest_path(method="MC", mc_samples=mx_samples, mc_dist=mc_dist))
+                if full:
+                    L = self.longest_path(method="MC", mc_samples=extra, mc_dist=mc_dist, full=True)
+                    for t in self.top_sort:
+                        E[t] += L[t] # TODO: check if this throws an error because L[t] is an np array.
+                else:                    
+                    E += list(self.longest_path(method="MC", mc_samples=extra, mc_dist=mc_dist))
+                return E 
             
-    def get_upward_ranks(self, method="S", mc_dist="GAMMA", mc_samples=1000):
+    def get_upward_ranks(self, method="S", mc_dist="NORMAL", mc_samples=1000):
         """
         
         Parameters
@@ -324,7 +349,7 @@ class SDAG:
         method : TYPE, optional
             DESCRIPTION. The default is "S".
         mc_dist : TYPE, optional
-            DESCRIPTION. The default is "GAMMA".
+            DESCRIPTION. The default is "NORMAL".
         mc_samples : TYPE, optional
             DESCRIPTION. The default is 1000.
 
@@ -347,10 +372,26 @@ class TDAG:
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
         
-    def set_weights(self, n_processors, ccr, cov):
+    def set_weights(self, n_processors, ccr, h, cov):
         """
-        Used for setting weights for DAGs from the STG.
+        Used for setting randomized weights for DAGs.
         """
+        # Set the power of each processor.
+        powers = {w : 1 + random.uniform(-h/2, h/2) for w in range(n_processors)}
+        
+        # Set the task costs.
+        avg_task_mean = random.uniform(1, 100)
+        for task in self.top_sort:
+            self.graph.nodes[task]['weight'] = {}
+            mean_task_size = random.uniform(0, 2 * avg_task_mean)
+            for w in range(n_processors):
+                mu = mean_task_size * powers[w]
+                sigma = cov * mu
+                self.graph.nodes[task]['weight'][w] = RV(mu, sigma)
+                
+        # Set the edge costs.
+        
+        
         for t in self.top_sort:
             self.graph.nodes[t]['weight'] = {}
             # Set possible node weights...
@@ -382,6 +423,14 @@ class TDAG:
             for s in self.graph.successors(t):
                 A[t][s]['weight'] = stochastic_average(self.graph[t][s]['weight'].values(), avg_type=avg_type)
         return SDAG(A)
+    
+    def comm_cost(self, parent, child, source, dest):
+        if source == dest:
+            return 0.0
+        elif source < dest:
+            return self.graph[parent][child]['weight'][(source, dest)]
+        else:
+            return self.graph[parent][child]['weight'][(dest, source)] # symmetric.
     
     def schedule_to_graph(self, schedule, where_scheduled=None):
         """
@@ -416,7 +465,8 @@ class TDAG:
             S.nodes[t]['weight'] = self.graph.nodes[t]['weight'][w] 
             for s in self.graph.successors(t):
                 w1 = where_scheduled[s]
-                S[t][s]['weight'] = self.graph[t][s]['weight'][(w, w1)] 
+                S[t][s]['weight'] = self.comm_cost(t, s, w, w1)
+                # S[t][s]['weight'] = self.graph[t][s]['weight'][(w, w1)] 
             # Add disjunctive edge if necessary.
             idx = list(r[0] for r in schedule[w]).index(t)
             if idx > 0:
@@ -453,7 +503,8 @@ class TDAG:
         TODO: Insertion.
         TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
         real bottlenecks.
-
+        TODO: changes to node weight dicts - see comm_cost method.
+        
         Returns
         -------
         None.
@@ -573,7 +624,6 @@ class TDAG:
                 except KeyError:
                     pass
                 
-                # TODO: Compute longest path using either CorLCA or MC.
                 # Add artificial exit node if necessary. 
                 exit_tasks = [t for t in S if not len(list(S.successors(t)))]
                 if len(exit_tasks) > 1:
@@ -585,7 +635,7 @@ class TDAG:
                         
                 # TODO: Compute longest path using either CorLCA or MC.
                 pi = SDAG(S)
-                worker_makespans[w]  = pi.longest_path(method="C")
+                worker_makespans[w] = pi.longest_path(method="C")
                 
                 # Clean up - remove edge etc. TODO: need to set node weight to zero?
                 if remove:
@@ -641,7 +691,6 @@ def clark(r1, r2, rho=0, minimization=False):
     Returns a new RV representing the maximization of self and other whose mean and variance
     are computed using Clark's equations for the first two moments of the maximization of two normal RVs.
     TODO: minimization from one of Canon's papers, find source and cite.
-    TODO: this is slow because of the calls to norm.pdf and norm.cdf. Is there any way to vectorize/optimize another way?
     See:
     'The greatest of a finite set of random variables,'
     Charles E. Clark (1983).

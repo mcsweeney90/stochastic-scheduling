@@ -12,8 +12,6 @@ from timeit import default_timer as timer
 sys.path.append('../../') 
 from src import TDAG, RV
 
-from statistics import fmean
-
 # # Source for topologies.
 # topologies = 'cholesky-topologies'
 # # Destination for saved files.
@@ -74,7 +72,7 @@ from statistics import fmean
 #                 with open('{}/{}{}{}.dill'.format(full_dest, name, adt, nb), 'wb') as handle: # name[:-5]
 #                     dill.dump(S, handle)
 
-with open('../cholesky/single/10N128.dill', 'rb') as file:
+with open('../cholesky/single/5N128.dill', 'rb') as file:
     G = dill.load(file) 
 start = timer()
 heft = G.get_averaged_schedule(heuristic="HEFT")
