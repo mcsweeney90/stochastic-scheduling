@@ -63,7 +63,7 @@ class RV:
             r = random.gauss(self.mu, self.sd)    # Faster than numpy for individual realizations.         
             return r if r > 0.0 else -r
         elif dist in ["G", "GAMMA", "gamma"]:
-            return random.gammavariate(alpha=(self.mu**2 / self.var), beta=self.var/self.mu)      
+            return random.gammavariate(alpha=(self.mu**2/self.var), beta=self.var/self.mu)      
         elif dist in ["U", "UNIFORM", "uniform"]:
             u = sqrt(3) * self.sd
             r = self.mu + random.uniform(-u, u)                
@@ -96,7 +96,8 @@ class ADAG:
     def edge_mean(self, parent, child, weighted=False):
         """TODO: update, changes to edge weights."""
         if not weighted:
-            return sum(self.graph[parent][child]['weight'].values())/len(self.graph[parent][child]['weight']) 
+            return 2 * sum(self.graph[parent][child]['weight'].values()) / len(self.graph.nodes[parent]['weight'])**2
+            # return sum(self.graph[parent][child]['weight'].values())/len(self.graph[parent][child]['weight']) 
         s1 = sum(1/v for v in self.graph.nodes[parent]['weight'].values())
         s2 = sum(1/v for v in self.graph.nodes[child]['weight'].values())
         cbar = 0.0
@@ -120,7 +121,10 @@ class ADAG:
         return ranks  
     
     def comm_cost(self, parent, child, source, dest):
-        """TODO."""
+        """
+        Get the communication/edge cost between parent and child when they are scheduled on source and dest (respectively).
+        Assumes communication is symmetric.  
+        """
         if source == dest:
             return 0.0
         elif source < dest:
@@ -372,32 +376,43 @@ class TDAG:
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
         
-    def set_weights(self, n_processors, ccr, h, cov):
+    def set_weights(self, n_processors, cov, ccr=1.0, H=(1.0, 1.0, 1.0)):
         """
         Used for setting randomized weights for DAGs.
+        H is a tuple that describes the (processor, task, communication) heterogeneity. 
+        TODO: randomize things?
         """
         # Set the power of each processor.
-        powers = {w : 1 + random.uniform(-h/2, h/2) for w in range(n_processors)}
+        powers = {w : 1 + random.uniform(-H[0]/2, H[0]/2) for w in range(n_processors)}
+        B = {}
+        for w in range(n_processors):
+            for p in range(w + 1, n_processors): 
+                B[(w, p)] = 1 + random.uniform(-H[2]/2, H[2]/2)
         
         # Set the task costs.
-        avg_task_mean = random.uniform(1, 100)
+        total_task_costs = 0.0
         for task in self.top_sort:
             self.graph.nodes[task]['weight'] = {}
-            mean_task_size = random.uniform(0, 2 * avg_task_mean)
+            mean_task_size = 1 + random.uniform(-H[1]/2, H[1]/2) 
+            total_task_costs += mean_task_size
             for w in range(n_processors):
                 mu = mean_task_size * powers[w]
                 sigma = cov * mu
-                self.graph.nodes[task]['weight'][w] = RV(mu, sigma)
+                self.graph.nodes[task]['weight'][w] = RV(mu, sigma**2)
                 
         # Set the edge costs.
-        
-        
-        for t in self.top_sort:
-            self.graph.nodes[t]['weight'] = {}
-            # Set possible node weights...
-            for p in self.graph.predecessors(t):
-                self.graph[p][t]['weight'] = {}
-                # Set possible edge weights...  
+        avg_edge_cost = (total_task_costs/ccr)/self.graph.number_of_edges()
+        for task in self.top_sort:
+            for child in self.graph.successors(task):
+                self.graph[task][child]['weight'] = {}
+                wbar = random.uniform(1-H[2]/2, 1+H[2]/2) * avg_edge_cost
+                D = (wbar * n_processors)/2                
+                for w in range(n_processors):
+                    for p in range(w + 1, n_processors):
+                        mu = D * B[(w, p)]
+                        sigma = cov * mu
+                        self.graph[task][child]['weight'][(w, p)] = RV(mu, sigma**2)
+         
                 
     def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
         """Return an equivalent graph with averaged weights."""
@@ -413,16 +428,28 @@ class TDAG:
                 A.nodes[t]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph.nodes[t]['weight'].items()}
                 for s in self.graph.successors(t):
                     A[t][s]['weight'] = {}
-                    average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type)
-                    A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()}
+                    average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) 
+                    # TODO: above may no longer be necessary.
+                    A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()} 
             return ADAG(A)
+                
+        # Stochastic averages. 
+        if avg_type in ["N", "NORMAL", "CLT"]:
+            L = len(self.graph.nodes[self.top_sort[0]]['weight'])
+            L2 = L*L
+            mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
+            var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
+            for t in self.top_sort:
+                m = sum(mean(r) for r in self.graph.nodes[t]['weight'].values()) # TODO: mean/var needed for nodes?
+                v = sum(var(r) for r in self.graph.nodes[t]['weight'].values())
+                A.nodes[t]['weight'] = RV(m, v)/L
+                for s in self.graph.successors(t):
+                    m1 = sum(mean(r) for r in self.graph[t][s]['weight'].values())
+                    v1 = sum(var(r) for r in self.graph[t][s]['weight'].values())
+                    A[t][s]['weight'] = RV(m1, v1)/L2
+            return SDAG(A)
         
-        # Stochastic averages.        
-        for t in self.top_sort:
-            A.nodes[t]['weight'] = stochastic_average(self.graph.nodes[t]['weight'].values(), avg_type=avg_type)
-            for s in self.graph.successors(t):
-                A[t][s]['weight'] = stochastic_average(self.graph[t][s]['weight'].values(), avg_type=avg_type)
-        return SDAG(A)
+        raise ValueError("Invalid stochastic average type!")
     
     def comm_cost(self, parent, child, source, dest):
         if source == dest:
@@ -503,7 +530,6 @@ class TDAG:
         TODO: Insertion.
         TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
         real bottlenecks.
-        TODO: changes to node weight dicts - see comm_cost method.
         
         Returns
         -------
@@ -523,7 +549,10 @@ class TDAG:
         schedule = {w : [] for w in workers}   
         while len(ready_tasks): 
             for task in ready_tasks:
-                avg_weight = stochastic_average(self.graph.nodes[task]['weight'].values(), avg_type="NORMAL") # TODO: check. 
+                m = sum(r.mu for r in self.graph.nodes[task]['weight'].values()) 
+                v = sum(r.var for r in self.graph.nodes[task]['weight'].values())
+                avg_weight = RV(m, v)/len(workers)
+                # avg_weight = stochastic_average(self.graph.nodes[task]['weight'].values(), avg_type="NORMAL") 
                 parents = list(self.graph.predecessors(task))
                 for w in workers:
                     # Compute delta.
@@ -535,9 +564,11 @@ class TDAG:
                     else:
                         p = parents[0]
                         # Compute DRT - start time without considering processor contention.
-                        drt = FT[p] + self.graph[p][task]['weight'][(where[p], w)]
+                        # drt = FT[p] + self.graph[p][task]['weight'][(where[p], w)] # TODO: comm_cost.
+                        drt = FT[p] + self.comm_cost(p, task, where[p], w) 
                         for p in parents[1:]:
-                            q = FT[p] + self.graph[p][task]['weight'][(where[p], w)]
+                            # q = FT[p] + self.graph[p][task]['weight'][(where[p], w)] # TODO: comm_cost.
+                            q = FT[p] + self.comm_cost(p, task, where[p], w) 
                             drt = clark(drt, q, rho=0)
                         # Find the earliest time task can be scheduled on the worker.
                         if not schedule[w]: # No tasks scheduled on worker. TODO: insertion.
@@ -611,7 +642,8 @@ class TDAG:
                 S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
                 # Same for edges.
                 for p in parents:
-                    S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
+                    # S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
+                    S[p][task]['weight'] = self.comm_costs(p, task, where[p], w)
                     
                 # TODO: Add the transitive edge if necessary. What about insertion?
                 remove = False
@@ -624,7 +656,7 @@ class TDAG:
                 except KeyError:
                     pass
                 
-                # Add artificial exit node if necessary. 
+                # Add artificial exit node if necessary. TODO: don't like this at all. And very slow.
                 exit_tasks = [t for t in S if not len(list(S.successors(t)))]
                 if len(exit_tasks) > 1:
                     S.add_node("X")
@@ -667,24 +699,7 @@ class TDAG:
     
 # =============================================================================
 # FUNCTIONS.
-# =============================================================================
-
-def stochastic_average(RVs, avg_type="NORMAL"):
-    """Return an RV representing the average of a set of RVs (and possibly scalar zeros)."""
-    
-    # Check if all RVs are actually floats/0.0. Not ideal but necessary...
-    if all((type(r) == float or type(r) == int) for r in RVs):
-        return 0.0
-    
-    if avg_type in ["N", "NORMAL"]:
-        L = len(RVs)
-        mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
-        m = sum(mean(r) for r in RVs)      
-        var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
-        v = sum(var(r) for r in RVs)
-        return RV(m, v)/L
-    # TODO: other types.
-    return 0.0    
+# =============================================================================   
     
 def clark(r1, r2, rho=0, minimization=False):
     """

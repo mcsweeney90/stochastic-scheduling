@@ -34,7 +34,7 @@ from src import TDAG, RV
 #                 var = np.var(timings[nb][adt][task_type][d])
 #                 weights[nb][adt][task_type][d] = RV(mu, var)
 
-# for name in range(5, 21, 5):   
+# for name in range(5, 11, 5):   
 #     print("\n{}".format(name))
 #     with open('{}/{}.dill'.format(topologies, name), 'rb') as file:
 #         G = dill.load(file)
@@ -60,26 +60,36 @@ from src import TDAG, RV
 #                         C.add_edge(ids[p], ids[t])
 #                         parent_type = p[0]
 #                         C[ids[p]][ids[t]]['weight'] = {}
-#                         for s, d in it.product(range(nc), range(nc)):
-#                             C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0  
-#                         for s, d in it.product(range(nc), range(nc, nc + ng)):
-#                             C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["CG"] 
-#                         for s, d in it.product(range(nc, nc + ng), range(nc)):
-#                             C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["GC"]
-#                         for s, d in it.product(range(nc, nc + ng), range(nc, nc + ng)):
-#                             C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0 if s == d else weights[nb][adt][task_type]["GG"]
+#                         # Seems to work okay... 
+#                         for s in range(nc + ng):
+#                             for d in range(s + 1, nc + ng):
+#                                 if s < nc and d < nc:
+#                                     C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0 
+#                                 elif s < nc and d >= nc:
+#                                     C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["CG"]
+#                                 elif s >= nc:
+#                                     C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["GG"]
+                        
+#                         # for s, d in it.product(range(nc), range(nc)):
+#                         #     C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0  
+#                         # for s, d in it.product(range(nc), range(nc, nc + ng)):
+#                         #     C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["CG"] 
+#                         # for s, d in it.product(range(nc, nc + ng), range(nc)):
+#                         #     C[ids[p]][ids[t]]['weight'][(s, d)] = weights[nb][adt][task_type]["GC"]
+#                         # for s, d in it.product(range(nc, nc + ng), range(nc, nc + ng)):
+#                         #     C[ids[p]][ids[t]]['weight'][(s, d)] = 0.0 if s == d else weights[nb][adt][task_type]["GG"]
 #                 S = TDAG(C)
 #                 with open('{}/{}{}{}.dill'.format(full_dest, name, adt, nb), 'wb') as handle: # name[:-5]
 #                     dill.dump(S, handle)
 
-with open('../cholesky/single/5N128.dill', 'rb') as file:
+with open('../cholesky/single/10N128.dill', 'rb') as file:
     G = dill.load(file) 
 start = timer()
-heft = G.get_averaged_schedule(heuristic="HEFT")
-# sdls = G.SDLS()
+# heft = G.get_averaged_schedule(heuristic="HEFT-WM")
+sdls = G.SDLS()
 # robheft = G.RobHEFT()
 elapsed = timer() - start
-length = heft.longest_path(method="C")
+length = sdls.longest_path(method="C")
 print("This took {} seconds".format(elapsed))
 print(length)
 
