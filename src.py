@@ -373,7 +373,10 @@ class SDAG:
 class TDAG:
     """Represents a graph with stochastic node and edge weights."""
     def __init__(self, graph):
-        """Graph is a NetworkX digraph with {Processor ID : RV} node and edge weights. Usually output by functions elsewhere..."""
+        """
+        Graph is a NetworkX digraph with {Processor ID : RV} node and edge weights. Usually output by functions elsewhere...
+        TODO: create a "workers" attribute since often useful when weights have been set?
+        """
         self.graph = graph
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
