@@ -29,20 +29,20 @@ stg_dag_path = 'graphs/STG/{}'.format(size)
 # elapsed = timer() - start
 # print("Time taken: {}".format(elapsed))
     
-with open('{}/147.dill'.format(stg_dag_path), 'rb') as file:
-    T = dill.load(file)
+# with open('{}/147.dill'.format(stg_dag_path), 'rb') as file:
+#     T = dill.load(file)
 
-T.set_weights(n_processors=4, cov=0.1)
-mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
-exp_comm, exp_comp = 0.0, 0.0
-for t in T.top_sort:
-    node_weights = list(v.mu for v in T.graph.nodes[t]['weight'].values())
-    exp_comp += sum(node_weights)/len(node_weights)
-    for s in T.graph.successors(t):
-        edge_weights = list(mean(v) for v in T.graph[t][s]['weight'].values())
-        edge_weights += edge_weights
-        edge_weights += [0.0]*4
-        exp_comm += sum(edge_weights)/len(edge_weights)
+# T.set_weights(n_processors=4, cov=0.1)
+# mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
+# exp_comm, exp_comp = 0.0, 0.0
+# for t in T.top_sort:
+#     node_weights = list(v.mu for v in T.graph.nodes[t]['weight'].values())
+#     exp_comp += sum(node_weights)/len(node_weights)
+#     for s in T.graph.successors(t):
+#         edge_weights = list(mean(v) for v in T.graph[t][s]['weight'].values())
+#         edge_weights += edge_weights
+#         edge_weights += [0.0]*4
+#         exp_comm += sum(edge_weights)/len(edge_weights)
     
-print(exp_comp, exp_comm)
+# print(exp_comp, exp_comm)
 
