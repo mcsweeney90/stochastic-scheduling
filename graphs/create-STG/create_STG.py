@@ -14,7 +14,7 @@ from src import TDAG
 ####################################################################################################
 
 # Variables etc used throughout.
-size = 1000
+size = 100
 src_path = 'original/{}'.format(size)
 dest = '../STG/{}'.format(size)
 pathlib.Path(dest).mkdir(parents=True, exist_ok=True)

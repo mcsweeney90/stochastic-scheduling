@@ -135,6 +135,7 @@ class ADAG:
     def simulate_scheduling(self, priority_list, policy="EFT"):
         """
         Simulates the scheduling of the tasks in priority_list.
+        TODO: add a PEFT-like "makespan" policy? 
         """ 
         # Get list of workers and initialize schedule.
         workers = self.graph.nodes[self.top_sort[0]]['weight'].keys()
@@ -363,6 +364,7 @@ class SDAG:
         
         Not the most efficient way of doing this since the entire graph is copied, but the overhead is typically low compared
         to the cost of the longest path algorithms so this isn't a huge issue.
+        Intended to be used for "averaged" graphs. 
         """    
         
         R = SDAG(self.graph.reverse())
@@ -379,40 +381,46 @@ class TDAG:
     def set_weights(self, n_processors, cov, ccr=1.0, H=(1.0, 1.0, 1.0)):
         """
         Used for setting randomized weights for DAGs.
-        H is a tuple that describes the (processor, task, communication) heterogeneity. 
-        TODO: randomize things?
+        H is a tuple that describes the (processor, task, communication) heterogeneity. All terms in [0, 2].
+        CCR is only approximate but that's probably best here.
+        cov is the mean coefficient of variation for ALL node and edge weight RVs. 
         """
         # Set the power of each processor.
-        powers = {w : 1 + random.uniform(-H[0]/2, H[0]/2) for w in range(n_processors)}
+        powers = {w : random.uniform(1-H[0]/2, 1+H[0]/2) for w in range(n_processors)}
+        # Set the "bandwidth" of each link (to ensure some consistency in edge costs).
         B = {}
         for w in range(n_processors):
             for p in range(w + 1, n_processors): 
-                B[(w, p)] = 1 + random.uniform(-H[2]/2, H[2]/2)
+                B[(w, p)] = random.uniform(1-H[2]/2, 1+H[2]/2)
         
         # Set the task costs.
-        total_task_costs = 0.0
+        exp_total_comp = 0.0
         for task in self.top_sort:
             self.graph.nodes[task]['weight'] = {}
-            mean_task_size = 1 + random.uniform(-H[1]/2, H[1]/2) 
-            total_task_costs += mean_task_size
+            mean_task_cost = 100 * random.uniform(1-H[1]/2, 1+H[1]/2)  # Multiplied by 100 only to make task sizes more interesting...
+            exp_total_comp += mean_task_cost
             for w in range(n_processors):
-                mu = mean_task_size * powers[w]
-                sigma = cov * mu
+                mu = mean_task_cost * powers[w]
+                sigma = random.uniform(0, 2*cov) * mu
                 self.graph.nodes[task]['weight'][w] = RV(mu, sigma**2)
                 
         # Set the edge costs.
-        avg_edge_cost = (total_task_costs/ccr)/self.graph.number_of_edges()
+        exp_edge_cost = (exp_total_comp/ccr)/self.graph.number_of_edges()   # Average of all edges means. 
         for task in self.top_sort:
             for child in self.graph.successors(task):
                 self.graph[task][child]['weight'] = {}
-                wbar = random.uniform(1-H[2]/2, 1+H[2]/2) * avg_edge_cost
-                D = (wbar * n_processors)/2                
+                wbar = random.uniform(1-H[2]/2, 1+H[2]/2) * exp_edge_cost # Average mean of this particular edge.
+                D = wbar * (n_processors/(n_processors-1))                
                 for w in range(n_processors):
                     for p in range(w + 1, n_processors):
                         mu = D * B[(w, p)]
-                        sigma = cov * mu
+                        sigma = random.uniform(0, 2*cov) * mu
                         self.graph[task][child]['weight'][(w, p)] = RV(mu, sigma**2)
-         
+                        
+    def serial_times(self):
+        """TODO. Similar to minimal serial time for scalar graphs, but no longer an unambiguous best."""
+        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())
+        return {w : sum(self.graph.nodes[t]['weight'][w] for t in self.top_sort) for w in workers}         
                 
     def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
         """Return an equivalent graph with averaged weights."""
@@ -525,7 +533,7 @@ class TDAG:
         
         return self.schedule_to_graph(schedule=pi, where_scheduled=where)
     
-    def SDLS(self, X=0.9, return_graph=True):
+    def SDLS(self, X=0.9, return_graph=True, insertion=False):
         """
         TODO: Insertion.
         TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
@@ -536,24 +544,29 @@ class TDAG:
         None.
 
         """
+        
+        # Get the list of workers - useful throughout.
+        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())
+        
         # Convert to stochastic averaged graph.
         S = self.get_averaged_graph(stochastic=True, avg_type="NORMAL")
         
-        # Get upward ranks.
-        B = S.get_upward_ranks(method="S") # Upward ranks computed via Sculli's method.
+        # Get upward ranks via Sculli's method.
+        B = S.get_upward_ranks(method="S") 
         
         # Compute the schedule.
-        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())    # Useful.
         ready_tasks = [self.top_sort[0]]    # Assumes single entry task.   
-        SDL, FT, where = {}, {}, {}
-        schedule = {w : [] for w in workers}   
+        SDL, FT, where = {}, {}, {}     # FT and where make computing the SDL values easier. 
+        schedule = {w : [] for w in workers}   # Loads are ordered
         while len(ready_tasks): 
             for task in ready_tasks:
+                # Estimate the average weight using the CLT.
                 m = sum(r.mu for r in self.graph.nodes[task]['weight'].values()) 
                 v = sum(r.var for r in self.graph.nodes[task]['weight'].values())
                 avg_weight = RV(m, v)/len(workers)
-                # avg_weight = stochastic_average(self.graph.nodes[task]['weight'].values(), avg_type="NORMAL") 
-                parents = list(self.graph.predecessors(task))
+                # Find all parents - useful for next part.
+                parents = list(self.graph.predecessors(task)) 
+                # Compute SDL value of the task on all workers.
                 for w in workers:
                     # Compute delta.
                     delta = avg_weight - self.graph.nodes[task]['weight'][w]    
@@ -564,10 +577,8 @@ class TDAG:
                     else:
                         p = parents[0]
                         # Compute DRT - start time without considering processor contention.
-                        # drt = FT[p] + self.graph[p][task]['weight'][(where[p], w)] # TODO: comm_cost.
                         drt = FT[p] + self.comm_cost(p, task, where[p], w) 
                         for p in parents[1:]:
-                            # q = FT[p] + self.graph[p][task]['weight'][(where[p], w)] # TODO: comm_cost.
                             q = FT[p] + self.comm_cost(p, task, where[p], w) 
                             drt = clark(drt, q, rho=0)
                         # Find the earliest time task can be scheduled on the worker.
@@ -576,27 +587,30 @@ class TDAG:
                         else:
                             EST = clark(drt, schedule[w][-1][2], rho=0)
                                                          
-                    # Compute SDL.
-                    SDL[(task, w)] = (B[task] - EST + delta, EST)    # Returns EST to prevent having to recalculate it later but a bit ugly.
+                    # Compute SDL. (EST incldued as second argument to avoid having to recalculate it later but a bit ugly.)
+                    SDL[(task, w)] = (B[task] - EST + delta, EST) 
                 
-            # Select the maximum pair. TODO: bit much for a one liner? Make sure it works...
-            # chosen_task, chosen_worker = max(it.product(ready_tasks, workers), key=lambda pr : norm.ppf(X, SDL[pr][0].mu, SDL[pr][0].sd))
+            # Select the maximum pair. 
             chosen_task, chosen_worker = max(it.product(ready_tasks, workers), 
                                               key=lambda pr : NormalDist(SDL[pr][0].mu, SDL[pr][0].sd).inv_cdf(X))
+            # Comment above and uncomment below for Python versions < 3.8.
+            # chosen_task, chosen_worker = max(it.product(ready_tasks, workers), key=lambda pr : norm.ppf(X, SDL[pr][0].mu, SDL[pr][0].sd))
                     
             # Schedule the chosen task on the chosen worker. 
             where[chosen_task] = chosen_worker
             FT[chosen_task] = SDL[(chosen_task, chosen_worker)][1] + self.graph.nodes[chosen_task]['weight'][chosen_worker]
             schedule[chosen_worker].append((chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task])) 
             
+            # Remove current task from ready set and add those now available for scheduling.
             ready_tasks.remove(chosen_task)
             for c in self.graph.successors(chosen_task):
                 if all(p in where for p in self.graph.predecessors(c)):
                     ready_tasks.append(c)   
                     
-        # If necessary, convert schedule to graph.
+        # If specified, convert schedule to graph and return it.
         if return_graph:
             return self.schedule_to_graph(schedule, where_scheduled=where)
+        # Else return schedule only.
         return schedule    
     
     def RobHEFT(self, a=45):
