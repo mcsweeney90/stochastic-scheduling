@@ -8,7 +8,7 @@ import random
 import networkx as nx
 import numpy as np
 import itertools as it
-from math import sqrt
+from math import sqrt, radians, tan
 from psutil import virtual_memory
 # from scipy.stats import norm # TODO: really slow but NormalDist only available for version >= 3.8. What to do on Matt's machine?
 from statistics import NormalDist # TODO: see above, not available on Matt's machine.
@@ -182,16 +182,6 @@ class ADAG:
                 schedule[min_worker].insert(idx, (task, st, ft)) 
             # print(schedule)
         return schedule, where    
-    
-    def HEFT(self, weighted=False):
-        # Compute upward ranks.
-        U = self.get_upward_ranks(weighted=weighted)
-        # Sort into priority list.
-        priority_list = list(sorted(U, key=U.get, reverse=True))
-        # Get schedule.
-        return self.simulate_scheduling(priority_list=priority_list)      
-    def PEFT(self):
-        return
 
 class SDAG:
     """Represents a graph with stochastic node and edge weights."""
@@ -420,10 +410,20 @@ class TDAG:
                         sigma = random.uniform(0, 2*cov) * mu
                         self.graph[task][child]['weight'][(w, p)] = RV(mu, sigma**2)
                         
-    def serial_times(self):
-        """TODO. Similar to minimal serial time for scalar graphs, but no longer an unambiguous best."""
-        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())
-        return {w : sum(self.graph.nodes[t]['weight'][w] for t in self.top_sort) for w in workers}         
+    def minimal_serial_time(self, mc_samples=1000):
+        """
+        Extension of minimal serial time for scalar graphs. 
+        Uses MC sampling to estimate the MST distribution, assuming that times are normally distributed (fairly
+        reasonable as they are typically the sum of 100 or so task costs).  
+        Assumes they are all independent (reasonable?)
+        """
+        workers = list(self.graph.nodes[self.top_sort[0]]['weight'])
+        realizations = []
+        for w in workers:
+            dist = sum(self.graph.nodes[t]['weight'][w] for t in self.top_sort) 
+            r = np.random.normal(dist.mu, dist.sd, mc_samples)
+            realizations.append(r)
+        return list(np.amin(realizations, axis=0))
                 
     def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
         """Return an equivalent graph with averaged weights."""
@@ -444,7 +444,7 @@ class TDAG:
                     A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()} 
             return ADAG(A)
                 
-        # Stochastic averages. 
+        # Stochastic averages. TODO: check the edge means since changes to set_weights.
         if avg_type in ["N", "NORMAL", "CLT"]:
             L = len(self.graph.nodes[self.top_sort[0]]['weight'])
             L2 = L*L
@@ -455,8 +455,8 @@ class TDAG:
                 v = sum(var(r) for r in self.graph.nodes[t]['weight'].values())
                 A.nodes[t]['weight'] = RV(m, v)/L
                 for s in self.graph.successors(t):
-                    m1 = sum(mean(r) for r in self.graph[t][s]['weight'].values())
-                    v1 = sum(var(r) for r in self.graph[t][s]['weight'].values())
+                    m1 = 2*sum(mean(r) for r in self.graph[t][s]['weight'].values())
+                    v1 = 2*sum(var(r) for r in self.graph[t][s]['weight'].values())
                     A[t][s]['weight'] = RV(m1, v1)/L2
             return SDAG(A)
         
@@ -472,12 +472,13 @@ class TDAG:
     
     def schedule_to_graph(self, schedule, where_scheduled=None):
         """
-        Convert schedule into a graph with stochastic weights whose longest path gives the makespan.
+        Convert (fullahead) schedule to a "disjunctive" graph with stochastic weights whose longest path gives the makespan.
         
         Parameters
         ----------
-        schedule : TYPE
-            DESCRIPTION.
+        schedule : DICT
+            {worker : [(task_id, est_start_time, est_finish_time), ...]}.
+            Note est_start_time and est_finish_time may be scalar or RVs.
         where : TYPE, optional
             DESCRIPTION. The default is None.
 
@@ -504,7 +505,6 @@ class TDAG:
             for s in self.graph.successors(t):
                 w1 = where_scheduled[s]
                 S[t][s]['weight'] = self.comm_cost(t, s, w, w1)
-                # S[t][s]['weight'] = self.graph[t][s]['weight'][(w, w1)] 
             # Add disjunctive edge if necessary.
             idx = list(r[0] for r in schedule[w]).index(t)
             if idx > 0:
@@ -514,208 +514,400 @@ class TDAG:
                     S[d][t]['weight'] = 0.0
         return SDAG(S) 
     
-    def get_averaged_schedule(self, heuristic="HEFT", avg_type="MEAN", avg_graph=None):
-        """
-        Compute a schedule using average costs.
-        Scheduled returned in the form of a graph with stochastic costs.
-        TODO: assumes sequential/fullahead schedule, how to handle assignment case?
-        """
-        # Construct the (scalar) "average" graph.
-        if avg_graph is None:
-            avg_graph = self.get_averaged_graph(avg_type=avg_type)
-        
-        # Apply specified heuristic. TODO: would ideally like to pass ADAG method as parameter. 
-        if heuristic == "HEFT": 
-            pi, where = avg_graph.HEFT()
-        elif heuristic == "HEFT-WM":
-            pi, where = avg_graph.HEFT(weighted=True)
-        elif heuristic == "PEFT":
-            pi, where = avg_graph.PEFT()
-        else:
-            raise ValueError("Invalid heuristic type specified!")
-        
-        return self.schedule_to_graph(schedule=pi, where_scheduled=where)
-    
-    def SDLS(self, X=0.9, return_graph=True, insertion=False):
-        """
-        TODO: Insertion.
-        TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
-        real bottlenecks.
-        
-        Returns
-        -------
-        None.
+# =============================================================================
+# DETERMINISTIC HEURISTICS.
+# =============================================================================
 
-        """
-        
-        # Get the list of workers - useful throughout.
-        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())
-        
-        # Convert to stochastic averaged graph.
-        S = self.get_averaged_graph(stochastic=True, avg_type="NORMAL")
-        
-        # Get upward ranks via Sculli's method.
-        B = S.get_upward_ranks(method="S") 
-        
-        # Compute the schedule.
-        ready_tasks = [self.top_sort[0]]    # Assumes single entry task.   
-        SDL, FT, where = {}, {}, {}     # FT and where make computing the SDL values easier. 
-        schedule = {w : [] for w in workers}   # Loads are ordered
-        while len(ready_tasks): 
-            for task in ready_tasks:
-                # Estimate the average weight using the CLT.
-                m = sum(r.mu for r in self.graph.nodes[task]['weight'].values()) 
-                v = sum(r.var for r in self.graph.nodes[task]['weight'].values())
-                avg_weight = RV(m, v)/len(workers)
-                # Find all parents - useful for next part.
-                parents = list(self.graph.predecessors(task)) 
-                # Compute SDL value of the task on all workers.
-                for w in workers:
-                    # Compute delta.
-                    delta = avg_weight - self.graph.nodes[task]['weight'][w]    
-                    
-                    # Compute earliest start time. 
-                    if not parents: # Single entry task.
-                        EST = 0.0
-                    else:
-                        p = parents[0]
-                        # Compute DRT - start time without considering processor contention.
-                        drt = FT[p] + self.comm_cost(p, task, where[p], w) 
-                        for p in parents[1:]:
-                            q = FT[p] + self.comm_cost(p, task, where[p], w) 
-                            drt = clark(drt, q, rho=0)
-                        # Find the earliest time task can be scheduled on the worker.
-                        if not schedule[w]: # No tasks scheduled on worker. TODO: insertion.
-                            EST = drt
-                        else:
-                            EST = clark(drt, schedule[w][-1][2], rho=0)
-                                                         
-                    # Compute SDL. (EST incldued as second argument to avoid having to recalculate it later but a bit ugly.)
-                    SDL[(task, w)] = (B[task] - EST + delta, EST) 
-                
-            # Select the maximum pair. 
-            chosen_task, chosen_worker = max(it.product(ready_tasks, workers), 
-                                              key=lambda pr : NormalDist(SDL[pr][0].mu, SDL[pr][0].sd).inv_cdf(X))
-            # Comment above and uncomment below for Python versions < 3.8.
-            # chosen_task, chosen_worker = max(it.product(ready_tasks, workers), key=lambda pr : norm.ppf(X, SDL[pr][0].mu, SDL[pr][0].sd))
-                    
-            # Schedule the chosen task on the chosen worker. 
-            where[chosen_task] = chosen_worker
-            FT[chosen_task] = SDL[(chosen_task, chosen_worker)][1] + self.graph.nodes[chosen_task]['weight'][chosen_worker]
-            schedule[chosen_worker].append((chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task])) 
-            
-            # Remove current task from ready set and add those now available for scheduling.
-            ready_tasks.remove(chosen_task)
-            for c in self.graph.successors(chosen_task):
-                if all(p in where for p in self.graph.predecessors(c)):
-                    ready_tasks.append(c)   
-                    
-        # If specified, convert schedule to graph and return it.
-        if return_graph:
-            return self.schedule_to_graph(schedule, where_scheduled=where)
-        # Else return schedule only.
-        return schedule    
+def HEFT(G, weighted=False):
+    """
+    HEFT scheduling heuristic.
+    TODO: assumes G is an ADAG. Put in a check?
+    """
+    # Compute upward ranks.
+    U = G.get_upward_ranks(weighted=weighted)
+    # Sort into priority list.
+    priority_list = list(sorted(U, key=U.get, reverse=True))
+    # Get schedule.
+    return G.simulate_scheduling(priority_list=priority_list) 
+
+# =============================================================================
+# STOCHASTIC HEURISTICS.
+# =============================================================================
+
+def SSTAR(S, det_heuristic=HEFT, avg_type="MEAN", weighted=False, avg_graph=None):
+    """
+    TODO: don't like passing weighted as an argument - what to do in general?
+    Converts a TDAG S to an "averaged" ADAG object based on avg_type, then applies det_heuristic to it. 
+    When avg_type == "MEAN" and det_heuristic == HEFT, this is just HEFT applied to the stochastic graph.
+    When avg_type == "MEAN" and det_heuristic == HEFT, this is the Stochastic HEFT (SHEFT) heuristic.        
+    'A stochastic scheduling algorithm for precedence constrained tasks on Grid',
+    Tang, Li, Liao, Fang, Wu (2011).
+    However, this function can take any other deterministic heuristic instead.
+
+    Parameters
+    ----------
+    S : TYPE
+        DESCRIPTION.
+    det_heuristic : TYPE
+        DESCRIPTION.
+
+    Returns
+    -------
+    None.
+
+    """
+    # Convert to an "averaged" graph with scalar weights (if necessary).
+    if avg_graph is None:
+        avg_graph = S.get_averaged_graph(avg_type=avg_type)
+    # Apply the chosen heuristic.
+    P, where = det_heuristic(avg_graph, weighted=weighted) 
+    # Convert fullahead schedule to its (stochastic) disjunctive graph and return.
+    return S.schedule_to_graph(schedule=P, where_scheduled=where)
     
-    def RobHEFT(self, a=45):
-        """
-        RobHEFT (HEFT with robustness) heuristic.
-        'Evaluation and optimization of the robustness of DAG schedules in heterogeneous environments,'
-        Canon and Jeannot (2010). 
-        """
-        
-        # # Get priority list of tasks.
-        # # TODO: is this what was meant here?
-        # A1 = self.get_averaged_graph(avg_type="MEAN")
-        # A2 = self.get_averaged_graph(avg_type="SD")
-        # UM = A1.get_upward_ranks()
-        # mmx = max(UM.values()) # since single entry/exit tasks could
-        # US = A2.get_upward_ranks()
-        # smx = max(US.values())
-        # U = {t : a * (UM[t]/mmx) + (90 - a) * (US[t]/smx) for t in self.top_sort}
-        # priority_list = list(sorted(self.top_sort, key=U.get)) # TODO: ascending or descending?
-        
-        A1 = self.get_averaged_graph(avg_type="MEAN")
-        UM = A1.get_upward_ranks()
-        priority_list = list(sorted(self.top_sort, key=UM.get, reverse=True)) # TODO: ascending or descending?
-        # print(priority_list)
-        
-        # Create the schedule graph.
-        # TODO: copy here and set all weights to 0.0?
-        S = self.graph.__class__()       
-        
-        # Simulate and find schedule.
-        workers = list(self.graph.nodes[self.top_sort[0]]['weight'].keys())    # Useful.   
-        where, last = {}, {} # Helpers.
-        for task in priority_list:
-            # print("\n{}".format(task))
-            S.add_node(task)
-            parents = list(self.graph.predecessors(task))
-            for p in parents:
-                S.add_edge(p, task)
-            worker_makespans = {}
+
+def SDLS(S, X=0.9, return_graph=True, insertion=None):
+    """
+    TODO: Insertion doesn't seem to make much of a difference
+    TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
+    real bottlenecks.
+    
+    Returns
+    -------
+    None.
+
+    """
+    
+    mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu # TODO: Hmmm... Only needed for insertion.
+    
+    # Get the list of workers - useful throughout.
+    workers = list(S.graph.nodes[S.top_sort[0]]['weight'])
+    
+    # Convert to stochastic averaged graph.
+    A = S.get_averaged_graph(stochastic=True, avg_type="NORMAL")    
+    # Get upward ranks via Sculli's method.
+    B = A.get_upward_ranks(method="S") 
+    
+    # Compute the schedule.
+    ready_tasks = [S.top_sort[0]]    # Assumes single entry task.   
+    SDL, FT, where = {}, {}, {}     # FT and where make computing the SDL values easier. 
+    schedule = {w : [] for w in workers}   # Loads are ordered
+    while len(ready_tasks): 
+        for task in ready_tasks:
+            # Get the average task weight (used for computing the SDL values).
+            avg_weight = A.graph.nodes[task]['weight']
+            # Find all parents - useful for next part.
+            parents = list(S.graph.predecessors(task)) 
+            # Compute SDL value of the task on all workers.
             for w in workers:
+                # Compute delta.
+                delta = avg_weight - S.graph.nodes[task]['weight'][w]    
                 
-                # Set schedule node weights. TODO: add node instead?
-                S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
-                # Same for edges.
-                for p in parents:
-                    # S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], w)]
-                    S[p][task]['weight'] = self.comm_costs(p, task, where[p], w)
-                    
-                # TODO: Add the transitive edge if necessary. What about insertion?
-                remove = False
-                try:
-                    L = last[w]
-                    if not S.has_edge(L, task):
-                        S.add_edge(L, task)
-                        S[L][task]['weight'] = 0.0
-                        remove = True
-                except KeyError:
-                    pass
+                # Compute earliest start time. 
+                if not parents: # Single entry task.
+                    EST, idx = 0.0, 0
+                else:
+                    p = parents[0]
+                    # Compute DRT - start time without considering processor contention.
+                    drt = FT[p] + S.comm_cost(p, task, where[p], w) 
+                    for p in parents[1:]:
+                        q = FT[p] + S.comm_cost(p, task, where[p], w) 
+                        drt = clark(drt, q, rho=0)
+                    # Find the earliest time task can be scheduled on the worker.
+                    if not schedule[w]: # No tasks scheduled on worker. 
+                        EST, idx = drt, 0
+                    else:
+                        if insertion is None:
+                            EST, idx = clark(drt, schedule[w][-1][2], rho=0), len(schedule[w])
+                        elif insertion in ["M", "MEAN"]: # mean instead of .mu - EST can be scalar...
+                            task_cost = S.graph.nodes[task]['weight'][w].mu
+                            found, prev_finish_time = False, 0.0
+                            for i, t in enumerate(schedule[w]):
+                                if mean(t[1]) < drt.mu:
+                                    prev_finish_time = t[2]
+                                    continue
+                                try:
+                                    poss_start_time = clark(prev_finish_time, drt) 
+                                except AttributeError:
+                                    poss_start_time = drt
+                                poss_finish_time = poss_start_time + task_cost
+                                if poss_finish_time.mu <= t[1].mu:
+                                    found = True
+                                    EST, idx = poss_start_time, i                           
+                                    break
+                                prev_finish_time = t[2]    
+                            # No valid gap found.
+                            if not found:
+                                EST, idx = clark(drt, schedule[w][-1][2], rho=0), len(schedule[w])
+                                                     
+                # Compute SDL. (EST included as second argument to avoid having to recalculate it later but a bit ugly.)
+                # SDL[(task, w)] = (B[task] - EST + delta, EST) if not insertion else (B[task] - EST + delta, EST, idx) 
+                SDL[(task, w)] = (B[task] - EST + delta, EST, idx)
+            
+        # Select the maximum pair. 
+        chosen_task, chosen_worker = max(it.product(ready_tasks, workers), 
+                                          key=lambda pr : NormalDist(SDL[pr][0].mu, SDL[pr][0].sd).inv_cdf(X))
+        # Comment above and uncomment below for Python versions < 3.8.
+        # chosen_task, chosen_worker = max(it.product(ready_tasks, workers), key=lambda pr : norm.ppf(X, SDL[pr][0].mu, SDL[pr][0].sd))
                 
-                # Add artificial exit node if necessary. TODO: don't like this at all. And very slow.
-                exit_tasks = [t for t in S if not len(list(S.successors(t)))]
-                if len(exit_tasks) > 1:
-                    S.add_node("X")
-                    S.nodes["X"]['weight'] = RV(0.0, 0.0) # don't like.
-                    for e in exit_tasks:
-                        S.add_edge(e, "X")
-                        S[e]["X"]['weight'] = 0.0 
-                        
-                # TODO: Compute longest path using either CorLCA or MC.
-                pi = SDAG(S)
-                worker_makespans[w] = pi.longest_path(method="C")
+        # Schedule the chosen task on the chosen worker. 
+        where[chosen_task] = chosen_worker
+        FT[chosen_task] = SDL[(chosen_task, chosen_worker)][1] + S.graph.nodes[chosen_task]['weight'][chosen_worker]
+        schedule[chosen_worker].insert(SDL[(chosen_task, chosen_worker)][2], (chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task]))
+        # if insertion:
+        #     schedule[chosen_worker].insert(SDL[(chosen_task, chosen_worker)][2], (chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task])) 
+        # else:
+        #     schedule[chosen_worker].append((chosen_task, SDL[(chosen_task, chosen_worker)][1], FT[chosen_task])) 
+        
+        # Remove current task from ready set and add those now available for scheduling.
+        ready_tasks.remove(chosen_task)
+        for c in S.graph.successors(chosen_task):
+            if all(p in where for p in S.graph.predecessors(c)):
+                ready_tasks.append(c)   
                 
-                # Clean up - remove edge etc. TODO: need to set node weight to zero?
-                if remove:
-                    S.remove_edge(L, task)
-                if len(exit_tasks) > 1:
-                    S.remove_node("X")
-                    
-            # print(worker_makespans)
-            # Select the "best" worker according to the aggregation/angle procedure.
-            # chosen_worker = closest_worker(worker_makespans, a=a)
-            chosen_worker = min(workers, key=lambda w:worker_makespans[w].mu)
-            # print(chosen_worker)
-            # "Schedule" the task on chosen worker.
-            where[task] = chosen_worker
-            S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
+    # If specified, convert schedule to graph and return it.
+    if return_graph:
+        return S.schedule_to_graph(schedule, where_scheduled=where)
+    # Else return schedule only.
+    return schedule  
+
+def choose_worker(est_makespans, alpha=45):
+    """
+    Helper function for RobHEFT.
+
+    Parameters
+    ----------
+    points : TYPE
+        DESCRIPTION.
+    a : TYPE, optional
+        DESCRIPTION. The default is 45.
+
+    Returns
+    -------
+    None.
+
+    """     
+    # Filter the dominated workers.   
+    sorted_workers = list(sorted(est_makespans, key=lambda p : est_makespans[p].mu)) # Ascending order of expected value.
+    dominated = [False] * len(sorted_workers)           
+    for i, w in enumerate(sorted_workers):
+        if dominated[i]:
+            continue
+        for j, q in enumerate(sorted_workers[:i]):   
+            if dominated[j]:
+                continue
+            if est_makespans[q].sd < est_makespans[w].sd:
+                dominated[i] = True 
+    nondominated = {w : est_makespans[w] for i, w in enumerate(sorted_workers) if not dominated[i]}
+        
+    # Find max mean and standard deviation for normalization.
+    mxm = max(m.mu for m in nondominated.values())
+    mxs = max(m.sd for m in nondominated.values())
+    
+    # Line segment runs from (0, 0) to (1, tan(alpha)) - but need to convert to radians first.
+    line_end_pt = tan(radians(alpha)) 
+    dist = lambda w : abs(line_end_pt * (nondominated[w].mu/mxm) - (nondominated[w].sd/mxs)) / sqrt(1 + line_end_pt**2)
+    return min(nondominated, key=dist)    
+
+def RobHEFT(S, alpha=45, mc_samples=None):
+    """
+    RobHEFT (HEFT with robustness) heuristic.
+    'Evaluation and optimization of the robustness of DAG schedules in heterogeneous environments,'
+    Canon and Jeannot (2010). 
+    TODO: Monte Carlo.
+    """
+    
+    mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
+    var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var    
+    workers = list(S.graph.nodes[S.top_sort[0]]['weight'])    # Useful.  
+    n_workers = len(workers)
+    
+    # Compute priorities for all tasks.
+    ranks = {}
+    for task in reversed(S.top_sort):
+        m = sum(r.mu for r in S.graph.nodes[task]['weight'].values())/n_workers
+        v = sum(r.var for r in S.graph.nodes[task]['weight'].values())/(n_workers*n_workers)            
+        ranks[task] = RV(m, v)
+        children = S.graph.successors(task)
+        ST = RV(0.0, 0.0)
+        for child in children:
+            m1 = 2*sum(mean(r) for r in S.graph[task][child]['weight'].values())/(n_workers*n_workers) 
+            v1 = 2*sum(var(r) for r in S.graph[task][child]['weight'].values())/(n_workers**4) 
+            child_st = RV(m1, v1) + ranks[child]
+            if child_st.mu > ST.mu:
+                ST = child_st
+        ranks[task] += ST
+    # Get maximums for later normalization.
+    mx_mu = ranks[S.top_sort[0]].mu
+    mx_sd = max(ranks[t].sd for t in S.top_sort)    
+           
+    # Create the schedule graph.
+    # TODO: remove and just use correlation tree? 
+    G = S.graph.__class__()       
+    
+    # Simulate and find schedule.  
+    where, last = {}, {} # Helpers.
+    ready_tasks = [S.top_sort[0]] 
+    while ready_tasks:
+        task = max(ready_tasks, key=lambda t : alpha*(ranks[t].mu/mx_mu) + (90-alpha)*(ranks[t].sd/mx_sd))
+        G.add_node(task)
+        parents = list(S.graph.predecessors(task))
+        for p in parents:
+            G.add_edge(p, task)
+        worker_makespans = {}
+        for w in workers:
+            
+            # Set schedule node weights. 
+            G.nodes[task]['weight'] = S.graph.nodes[task]['weight'][w]
             # Same for edges.
             for p in parents:
-                S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], chosen_worker)]
+                G[p][task]['weight'] = S.comm_cost(p, task, where[p], w)
+                
+            # TODO: Add the transitive edge if necessary. What about insertion?
+            remove = False
             try:
-                L = last[chosen_worker]
-                if not S.has_edge(L, task):
-                    S.add_edge(L, task)
-                    S[L][task]['weight'] = 0.0
+                L = last[w]
+                if not G.has_edge(L, task):
+                    G.add_edge(L, task)
+                    G[L][task]['weight'] = 0.0
+                    remove = True
             except KeyError:
                 pass
-            last[chosen_worker] = task
-       
-        return SDAG(S)
+            
+            # Add artificial exit node if necessary. TODO: don't like this at all. And very slow.
+            exit_tasks = [t for t in G if not len(list(G.successors(t)))]
+            if len(exit_tasks) > 1:
+                G.add_node("X")
+                G.nodes["X"]['weight'] = RV(0.0, 0.0) # don't like.
+                for e in exit_tasks:
+                    G.add_edge(e, "X")
+                    G[e]["X"]['weight'] = 0.0 
+                    
+            # Compute longest path using either CorLCA or MC.
+            P = SDAG(G)
+            if mc_samples is not None:
+                worker_dist = P.longest_path(method="MC", mc_dist="N", mc_samples=mc_samples) # TODO: assume normal costs?
+                m = sum(worker_dist)/len(worker_dist)
+                v = np.var(worker_dist)
+                worker_makespans[w] = RV(m, v)
+            else:
+                worker_makespans[w] = P.longest_path(method="C")
+            
+            # Clean up - remove edge etc. TODO: need to set node weight to zero?
+            if remove:
+                G.remove_edge(L, task)
+            if len(exit_tasks) > 1:
+                G.remove_node("X")
+                
+        # Select the "best" worker according to the aggregation/angle procedure.
+        chosen_worker = choose_worker(worker_makespans, alpha)
+        # "Schedule" the task on chosen worker.
+        where[task] = chosen_worker
+        G.nodes[task]['weight'] = S.graph.nodes[task]['weight'][chosen_worker]
+        # Same for edges.
+        for p in parents:
+            G[p][task]['weight'] = S.comm_cost(p, task, where[p], chosen_worker)
+        try:
+            L = last[chosen_worker]
+            if not G.has_edge(L, task):
+                G.add_edge(L, task)
+                G[L][task]['weight'] = 0.0
+        except KeyError:
+            pass
+        last[chosen_worker] = task
+        
+        # Remove current task from ready set and add those now available for scheduling.
+        ready_tasks.remove(task)
+        for c in S.graph.successors(task):
+            if all(p in where for p in S.graph.predecessors(c)):
+                ready_tasks.append(c) 
+   
+    return SDAG(G)
+
+def MCS(S, production_heuristic="HEFT", production_steps=10, selection_steps=10, threshold=0.1, fullahead=True):
+    """ 
+    TODO: see old code.
+    Monte Carlo Scheduling (MCS).
+    'Stochastic DAG scheduling using a Monte Carlo approach,'
+    Zheng and Sakellariou (2013).
+    """
+    return
+    
+
+# def list_scheduler(self, task_list, policy="EFT", insertion=False, eval_method="C"):
+#     """TODO. Schedule the list in order according to the policy."""
+    
+#     workers = list(self.graph.nodes[self.top_sort[0]]['weight'])
+    
+#     S = self.graph.__class__() 
+    
+#     where, loads, last = {}, {}, {}
+#     for task in task_list:
+#         S.add_node(task)
+#         parents = list(self.graph.predecessors(task)) 
+#         for p in parents:
+#             S.add_edge(p, task)
+#         worker_makespans = {}
+#         for w in workers:
+#             # Set schedule node weights. TODO: add node instead?
+#             S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
+#             # Same for edges.
+#             for p in parents:
+#                 S[p][task]['weight'] = self.comm_costs(p, task, where[p], w)
+            
+#             # Transitive edges. TODO: insertion.
+#             remove = False
+#             try:
+#                 L = last[w]
+#                 if not S.has_edge(L, task):
+#                     S.add_edge(L, task)
+#                     S[L][task]['weight'] = 0.0
+#                     remove = True
+#             except KeyError:
+#                 pass
+            
+#             # Possibly need to add single exit task.
+#             exit_tasks = [t for t in S if not len(list(S.successors(t)))]
+#             if len(exit_tasks) > 1:
+#                 S.add_node("X")
+#                 S.nodes["X"]['weight'] = RV(0.0, 0.0) # don't like.
+#                 for e in exit_tasks:
+#                     S.add_edge(e, "X")
+#                     S[e]["X"]['weight'] = 0.0 
+                
+#             # Evaluate the makespan.
+#             P = SDAG(S)
+#             worker_makespans[w] = P.longest_path(method=eval_method)
+            
+#             # Clean up - remove edge etc. TODO: need to set node weight to zero?
+#             if remove:
+#                 S.remove_edge(L, task)
+#             if len(exit_tasks) > 1:
+#                 S.remove_node("X")
+                
+#         # print(worker_makespans)
+#         # Select the "best" worker according to the aggregation/angle procedure.
+#         # chosen_worker = closest_worker(worker_makespans, a=a)
+#         chosen_worker = min(workers, key=lambda w:worker_makespans[w].mu)
+#         # print(chosen_worker)
+#         # "Schedule" the task on chosen worker.
+#         where[task] = chosen_worker
+#         S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
+#         # Same for edges.
+#         for p in parents:
+#             S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], chosen_worker)]
+#         try:
+#             L = last[chosen_worker]
+#             if not S.has_edge(L, task):
+#                 S.add_edge(L, task)
+#                 S[L][task]['weight'] = 0.0
+#         except KeyError:
+#             pass
+#         last[chosen_worker] = task
+            
+#     return SDAG(S) 
     
 # =============================================================================
-# FUNCTIONS.
+# GENERAL FUNCTIONS.
 # =============================================================================   
     
 def clark(r1, r2, rho=0, minimization=False):
@@ -745,53 +937,6 @@ def clark(r1, r2, rho=0, minimization=False):
         var += (r1.mu + r2.mu) * a * pdf
         var -= mu**2         
     return RV(mu, var)  
-    
-     
-def closest_worker(makespans, a=45):
-    """
-    Helper function for RobHEFT.
-
-    Parameters
-    ----------
-    points : TYPE
-        DESCRIPTION.
-    a : TYPE, optional
-        DESCRIPTION. The default is 45.
-
-    Returns
-    -------
-    None.
-
-    """     
-    # Filter the dominated points.   
-    sorted_workers = list(sorted(makespans, key=lambda p : makespans[p].mu)) # Ascending order of expected value.
-    dominated = [False] * len(sorted_workers)           
-    for i, w in enumerate(sorted_workers):
-        if dominated[i]:
-            continue
-        for j, q in enumerate(sorted_workers[:i]):   
-            if dominated[j]:
-                continue
-            if makespans[q].sd < makespans[w].sd:
-                dominated[i] = True 
-    nondominated = {w : makespans[w] for i, w in enumerate(sorted_workers) if not dominated[i]}
-    # print(nondominated)
-        
-    # Find max mean and standard deviation in order to scale them.
-    mxm = max(m.mu for m in makespans.values())
-    mxs = max(m.sd for m in makespans.values())
-    
-    # Convert angle to radians.
-    angle = a * np.pi / 180 
-    # Line segment runs from (0, 0) to (1, tan(a)).
-    line_end_pt = np.tan(angle) 
-    
-    D = {}
-    for w, m in nondominated.items():
-        x, y = m.mu/mxm, m.sd/mxs
-        # Find distance to line.
-        D[w] = abs(line_end_pt * x - y) / sqrt(1 + line_end_pt**2)
-    return min(D, key=D.get)   
         
         
 
