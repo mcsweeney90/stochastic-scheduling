@@ -7,7 +7,7 @@ Test script.
 import os, dill
 import numpy as np
 from timeit import default_timer as timer
-from src import RV, SSTAR, SDLS, RobHEFT
+from src import RV, SSTAR, SDLS, RobHEFT, HEFT, MCS
 
 size = 100
 stg_dag_path = 'graphs/STG/{}'.format(size)
@@ -32,14 +32,14 @@ stg_dag_path = 'graphs/STG/{}'.format(size)
     
 with open('{}/147.dill'.format(stg_dag_path), 'rb') as file:
     T = dill.load(file)
-T.set_weights(n_processors=4, cov=0.1) 
+T.set_weights(n_processors=4, cov=0.2) 
 
-mst = T.minimal_serial_time(mc_samples=100000)
-print("MST: RV(mu = {}, var = {})".format(sum(mst)/len(mst), np.var(mst)))
+# mst = T.minimal_serial_time(mc_samples=100000)
+# print("MST: RV(mu = {}, var = {})".format(sum(mst)/len(mst), np.var(mst)))
 
-# heft_schedule = SSTAR(T, weighted=False)
-# heft = heft_schedule.longest_path(method="S")
-# print("HEFT length: {}".format(heft))
+heft_schedule = SSTAR(T, weighted=False)
+heft = heft_schedule.longest_path(method="S")
+print("HEFT length: {}".format(heft))
 
 # wheft_schedule = SSTAR(T, weighted=True)
 # wheft = wheft_schedule.longest_path(method="S")
@@ -64,3 +64,19 @@ print("MST: RV(mu = {}, var = {})".format(sum(mst)/len(mst), np.var(mst)))
 # rob_schedule = RobHEFT(T, alpha=45)
 # rob = rob_schedule.longest_path(method="S")
 # print("RobHEFT length: {}".format(rob))
+
+mcs_schedule = MCS(T)
+mcs = mcs_schedule.longest_path(method="S")
+print("MCS length: {}".format(mcs))
+
+
+
+# L = []
+# for _ in range(10):
+#     # Get the standard HEFT schedule.
+#     avg_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
+#     mean_static_schedule, where = HEFT(avg_graph) 
+#     omega_mean = T.schedule_to_graph(schedule=mean_static_schedule, where_scheduled=where)
+#     if all(omega_mean.graph.edges != s.graph.edges for s in L):
+#         L.append(omega_mean)
+# print(len(L))

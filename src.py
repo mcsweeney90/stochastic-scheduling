@@ -79,7 +79,10 @@ class RV:
             return self.sd
 
 class ADAG:
-    """Represents a graph with average node and edge weights."""
+    """
+    Represents a graph with average node and edge weights.
+    TODO: rename this - is scalar graph so SDAG arguably makes more sense...
+    """
     def __init__(self, graph):
         """Graph is a NetworkX digraph with {Processor ID : float} node and edge weights. Usually output by functions elsewhere..."""
         self.graph = graph
@@ -148,8 +151,7 @@ class ADAG:
             worker_schedules = {}
             for w in workers:
                 task_cost = self.graph.nodes[task]['weight'][w]
-                # Find the data-ready time.                    
-                # drt = 0.0 if not parents else max(finish_times[p] + self.graph[p][task]['weight'][(where[p], w)] for p in parents) 
+                # Find the data-ready time.       
                 drt = 0.0 if not parents else max(finish_times[p] + self.comm_cost(p, task, where[p], w) for p in parents)
                 # Find time worker can actually execute the task.
                 if not schedule[w]:
@@ -180,7 +182,6 @@ class ADAG:
                 schedule[min_worker].append((task, st, ft))  
             else: 
                 schedule[min_worker].insert(idx, (task, st, ft)) 
-            # print(schedule)
         return schedule, where    
 
 class SDAG:
@@ -190,6 +191,39 @@ class SDAG:
         self.graph = graph
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
+        
+    def CPM(self, variance=False):
+        """
+        TODO: check this meshes with everything else. Maybe rewrite with lambda functions rather than the try statements.
+        Returns the classic PERT-CPM bound on the expected value of the longest path.
+        If variance == True, also returns the variance of this path to use as a rough estimate
+        of the longest path variance.
+        """
+        C = {}       
+        for t in self.top_sort:
+            st = 0.0
+            if variance:
+                v = 0.0
+            for p in self.graph.predecessors(t):
+                pst = C[p] if not variance else C[p].mu
+                try:
+                    pst += self.graph[p][t]['weight'].mu
+                except AttributeError: # Disjunctive edge.
+                    pass
+                st = max(st, pst)  
+                if variance and st == pst:
+                    v = C[p].var
+                    try:
+                        v += self.graph[p][t]['weight'].var
+                    except AttributeError:
+                        pass
+            m = self.graph.nodes[t]['weight'].mu
+            if not variance:
+                C[t] = m + st      
+            else:
+                var = self.graph.nodes[t]['weight'].var
+                C[t] = RV(m + st, var + v)                                    
+        return C 
         
     def longest_path(self, method="S", mc_dist="GAMMA", mc_samples=1000, full=False):
         """
@@ -424,43 +458,98 @@ class TDAG:
             r = np.random.normal(dist.mu, dist.sd, mc_samples)
             realizations.append(r)
         return list(np.amin(realizations, axis=0))
-                
-    def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
-        """Return an equivalent graph with averaged weights."""
+    
+    def get_scalar_graph(self, kind="AVERAGE", avg_type="MEAN", real_dist="GAMMA"):
+        """Return an ADAG object..."""
         
         # Copy the topology.
         A = self.graph.__class__()
         A.add_nodes_from(self.graph)
         A.add_edges_from(self.graph.edges)
         
-        # Scalar averages.
-        if not stochastic:
-            for t in self.top_sort:
+        # Set the weights.
+        # edge_average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) # TODO: needed (also real one)?
+        for t in self.top_sort:
+            # Set node weights.
+            if kind in ["A", "AVERAGE", "average"]:
                 A.nodes[t]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph.nodes[t]['weight'].items()}
-                for s in self.graph.successors(t):
-                    A[t][s]['weight'] = {}
-                    average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) 
-                    # TODO: above may no longer be necessary.
-                    A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()} 
-            return ADAG(A)
+            elif kind in ["R", "REALIZATION", "REAL", "realization", "real"]:
+                A.nodes[t]['weight'] = {k : v.realize(dist=real_dist) for k, v in self.graph.nodes[t]['weight'].items()}
+            # Set edge weights.
+            for s in self.graph.successors(t):
+                if kind in ["A", "AVERAGE", "average"]:                    
+                    A[t][s]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph[t][s]['weight'].items()}
+                elif kind in ["R", "REALIZATION", "REAL", "realization", "real"]:                
+                    A[t][s]['weight'] = {k : v.realize(dist=real_dist) for k, v in self.graph[t][s]['weight'].items()} 
+        # Return ADAG object.      
+        return ADAG(A)
+    
+    def get_averaged_graph(self, avg_type="NORMAL"):
+        """Return a graph with averaged weights..."""
+        
+        # Copy the topology.
+        A = self.graph.__class__()
+        A.add_nodes_from(self.graph)
+        A.add_edges_from(self.graph.edges)
+        
+        # TODO: are these needed since changes?
+        # mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
+        # var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
                 
-        # Stochastic averages. TODO: check the edge means since changes to set_weights.
+        # Stochastic averages.
         if avg_type in ["N", "NORMAL", "CLT"]:
             L = len(self.graph.nodes[self.top_sort[0]]['weight'])
             L2 = L*L
-            mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
-            var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
             for t in self.top_sort:
-                m = sum(mean(r) for r in self.graph.nodes[t]['weight'].values()) # TODO: mean/var needed for nodes?
-                v = sum(var(r) for r in self.graph.nodes[t]['weight'].values())
+                m = sum(r.mu for r in self.graph.nodes[t]['weight'].values()) 
+                v = sum(r.var for r in self.graph.nodes[t]['weight'].values())
                 A.nodes[t]['weight'] = RV(m, v)/L
                 for s in self.graph.successors(t):
-                    m1 = 2*sum(mean(r) for r in self.graph[t][s]['weight'].values())
-                    v1 = 2*sum(var(r) for r in self.graph[t][s]['weight'].values())
+                    # m1 = 2*sum(mean(r) for r in self.graph[t][s]['weight'].values())
+                    # v1 = 2*sum(var(r) for r in self.graph[t][s]['weight'].values())
+                    m1 = 2*sum(r.mu for r in self.graph[t][s]['weight'].values())
+                    v1 = 2*sum(r.var for r in self.graph[t][s]['weight'].values())
                     A[t][s]['weight'] = RV(m1, v1)/L2
             return SDAG(A)
         
-        raise ValueError("Invalid stochastic average type!")
+        raise ValueError("Invalid stochastic average type!")        
+                
+    # def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
+    #     """Return an equivalent graph with averaged weights."""
+        
+    #     # Copy the topology.
+    #     A = self.graph.__class__()
+    #     A.add_nodes_from(self.graph)
+    #     A.add_edges_from(self.graph.edges)
+        
+    #     # Scalar averages.
+    #     if not stochastic:
+    #         for t in self.top_sort:
+    #             A.nodes[t]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph.nodes[t]['weight'].items()}
+    #             for s in self.graph.successors(t):
+    #                 A[t][s]['weight'] = {}
+    #                 average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) 
+    #                 # TODO: above may no longer be necessary.
+    #                 A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()} 
+    #         return ADAG(A)
+                
+    #     # Stochastic averages. TODO: check the edge means since changes to set_weights.
+    #     if avg_type in ["N", "NORMAL", "CLT"]:
+    #         L = len(self.graph.nodes[self.top_sort[0]]['weight'])
+    #         L2 = L*L
+    #         mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
+    #         var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
+    #         for t in self.top_sort:
+    #             m = sum(mean(r) for r in self.graph.nodes[t]['weight'].values()) # TODO: mean/var needed for nodes?
+    #             v = sum(var(r) for r in self.graph.nodes[t]['weight'].values())
+    #             A.nodes[t]['weight'] = RV(m, v)/L
+    #             for s in self.graph.successors(t):
+    #                 m1 = 2*sum(mean(r) for r in self.graph[t][s]['weight'].values())
+    #                 v1 = 2*sum(var(r) for r in self.graph[t][s]['weight'].values())
+    #                 A[t][s]['weight'] = RV(m1, v1)/L2
+    #         return SDAG(A)
+        
+    #     raise ValueError("Invalid stochastic average type!")
     
     def comm_cost(self, parent, child, source, dest):
         if source == dest:
@@ -534,7 +623,7 @@ def HEFT(G, weighted=False):
 # STOCHASTIC HEURISTICS.
 # =============================================================================
 
-def SSTAR(S, det_heuristic=HEFT, avg_type="MEAN", weighted=False, avg_graph=None):
+def SSTAR(S, det_heuristic=HEFT, avg_type="MEAN", weighted=False, scalar_graph=None):
     """
     TODO: don't like passing weighted as an argument - what to do in general?
     Converts a TDAG S to an "averaged" ADAG object based on avg_type, then applies det_heuristic to it. 
@@ -557,10 +646,10 @@ def SSTAR(S, det_heuristic=HEFT, avg_type="MEAN", weighted=False, avg_graph=None
 
     """
     # Convert to an "averaged" graph with scalar weights (if necessary).
-    if avg_graph is None:
-        avg_graph = S.get_averaged_graph(avg_type=avg_type)
+    if scalar_graph is None:
+        scalar_graph = S.get_scalar_graph(kind="A", avg_type=avg_type)
     # Apply the chosen heuristic.
-    P, where = det_heuristic(avg_graph, weighted=weighted) 
+    P, where = det_heuristic(scalar_graph, weighted=weighted) 
     # Convert fullahead schedule to its (stochastic) disjunctive graph and return.
     return S.schedule_to_graph(schedule=P, where_scheduled=where)
     
@@ -583,7 +672,7 @@ def SDLS(S, X=0.9, return_graph=True, insertion=None):
     workers = list(S.graph.nodes[S.top_sort[0]]['weight'])
     
     # Convert to stochastic averaged graph.
-    A = S.get_averaged_graph(stochastic=True, avg_type="NORMAL")    
+    A = S.get_averaged_graph(avg_type="NORMAL")    
     # Get upward ranks via Sculli's method.
     B = A.get_upward_ranks(method="S") 
     
@@ -713,11 +802,8 @@ def RobHEFT(S, alpha=45, mc_samples=None):
     RobHEFT (HEFT with robustness) heuristic.
     'Evaluation and optimization of the robustness of DAG schedules in heterogeneous environments,'
     Canon and Jeannot (2010). 
-    TODO: Monte Carlo.
     """
-    
-    mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
-    var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var    
+       
     workers = list(S.graph.nodes[S.top_sort[0]]['weight'])    # Useful.  
     n_workers = len(workers)
     
@@ -730,8 +816,8 @@ def RobHEFT(S, alpha=45, mc_samples=None):
         children = S.graph.successors(task)
         ST = RV(0.0, 0.0)
         for child in children:
-            m1 = 2*sum(mean(r) for r in S.graph[task][child]['weight'].values())/(n_workers*n_workers) 
-            v1 = 2*sum(var(r) for r in S.graph[task][child]['weight'].values())/(n_workers**4) 
+            m1 = 2*sum(r.mu for r in S.graph[task][child]['weight'].values())/(n_workers*n_workers) 
+            v1 = 2*sum(r.var for r in S.graph[task][child]['weight'].values())/(n_workers**4)
             child_st = RV(m1, v1) + ranks[child]
             if child_st.mu > ST.mu:
                 ST = child_st
@@ -762,7 +848,7 @@ def RobHEFT(S, alpha=45, mc_samples=None):
             for p in parents:
                 G[p][task]['weight'] = S.comm_cost(p, task, where[p], w)
                 
-            # TODO: Add the transitive edge if necessary. What about insertion?
+            # Add the transitive edge if necessary. TODO: insertion?
             remove = False
             try:
                 L = last[w]
@@ -823,22 +909,18 @@ def RobHEFT(S, alpha=45, mc_samples=None):
    
     return SDAG(G)
 
-def MCS(S, production_heuristic="HEFT", production_steps=10, selection_steps=10, threshold=0.1, fullahead=True):
-    """ 
-    TODO: see old code.
-    Monte Carlo Scheduling (MCS).
-    'Stochastic DAG scheduling using a Monte Carlo approach,'
-    Zheng and Sakellariou (2013).
-    """
-    return
-    
-
-# def list_scheduler(self, task_list, policy="EFT", insertion=False, eval_method="C"):
+# def GGB(G, priorities=None, policy="EFT", insertion=False, eval_method="C"):
 #     """TODO. Schedule the list in order according to the policy."""
     
-#     workers = list(self.graph.nodes[self.top_sort[0]]['weight'])
+#     workers = list(G.graph.nodes[G.top_sort[0]]['weight'])
     
-#     S = self.graph.__class__() 
+#     # Create and grow the schedule graph.
+#     S = G.graph.__class__() 
+    
+#     if priorities is not None:
+#         prios = priorities()
+#     else:
+#         prios = 0         
     
 #     where, loads, last = {}, {}, {}
 #     for task in task_list:
@@ -905,6 +987,42 @@ def MCS(S, production_heuristic="HEFT", production_steps=10, selection_steps=10,
 #         last[chosen_worker] = task
             
 #     return SDAG(S) 
+
+def MCS(S, production_heuristic=HEFT, production_steps=100, threshold=0.2, dist="N", samples=1000):
+    """ 
+    Monte Carlo Scheduling (MCS).
+    'Stochastic DAG scheduling using a Monte Carlo approach,'
+    Zheng and Sakellariou (2013).
+    TODO: seems to work but almost never overrules HEFT - bug somewhere or just parameters/graph instances?
+    """
+    
+    # Create schedule list.
+    L = []
+    
+    # Get the standard HEFT schedule.
+    avg_graph = S.get_scalar_graph(kind="A", avg_type="MEAN")
+    mean_static_schedule, where = production_heuristic(avg_graph) 
+    omega_mean = S.schedule_to_graph(schedule=mean_static_schedule, where_scheduled=where)
+    qualify_check = omega_mean.CPM()[S.top_sort[-1]] * (1 + threshold) # TODO. Think this works but verify. Dynamically updated in 
+    L.append(omega_mean)
+    
+    # Production step.
+    for _ in range(production_steps):
+        G = S.get_scalar_graph(kind="R", real_dist=dist) 
+        static_schedule, where = production_heuristic(G)
+        omega = S.schedule_to_graph(schedule=static_schedule, where_scheduled=where)
+        # if all(omega.graph.edges != pi.graph.edges for pi in L): # TODO: doesn't work, override comparator for SDAGs?
+        #     continue
+        # Calculate CPM longest path of omega and compare with average.
+        if omega.CPM()[S.top_sort[-1]] < qualify_check: 
+            L.append(omega)  
+    print(len(L))
+    # Evaluate the makespan distributions of the candidiate schedules.
+    makespans = {pi : pi.longest_path(method="MC", mc_dist=dist, mc_samples=samples) for pi in L}  
+    # print(list(sum(makespans[pi])/len(makespans[pi]) for pi in L))
+    return min(L, key=lambda pi : sum(makespans[pi])/len(makespans[pi]))    
+    
+
     
 # =============================================================================
 # GENERAL FUNCTIONS.
