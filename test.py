@@ -7,26 +7,31 @@ Test script.
 import os, dill
 import numpy as np
 from timeit import default_timer as timer
-from src import RV, SSTAR, SDLS, RobHEFT, HEFT, MCS
+from src import RV, SSTAR, SDLS, RobHEFT, HEFT, MCS, PEFT
 
 size = 100
 stg_dag_path = 'graphs/STG/{}'.format(size)
 
 # start = timer()
+# slr = {"HEFT": [], "PEFT" : []}
 # for dname in os.listdir(stg_dag_path): 
-#     print("\nDAG: {}".format(dname[:-5]))
+#     # print("\nDAG: {}".format(dname[:-5]))
 #     with open('{}/{}'.format(stg_dag_path, dname), 'rb') as file:
 #         T = dill.load(file)
-#     T.set_weights(n_processors=8, cov=0.3)    
-#     heft_schedule = T.get_averaged_schedule(heuristic="HEFT")
-#     heft = heft_schedule.longest_path(method="S")
-#     print("HEFT length: {}".format(heft))
-#     sheft_schedule = T.get_averaged_schedule(heuristic="HEFT", avg_type="SHEFT")
-#     sheft = sheft_schedule.longest_path(method="S")
-#     print("SHEFT length: {}".format(sheft))
-#     sdls_schedule = T.SDLS(insertion=None)
-#     sdls = sdls_schedule.longest_path(method="C")
-#     print("SDLS length: {}".format(sdls))
+#     T.set_weights(n_processors=4, cov=0.3) 
+    
+#     A = T.get_scalar_graph(kind="A", avg_type="MEAN")
+    
+#     lb = A.makespan_lower_bound()
+    
+#     pi, _ = HEFT(A)
+#     slr["HEFT"].append(max(L[-1][2] for L in pi.values())/lb)
+#     # print(max(L[-1][2] for L in pi.values()))
+    
+#     pi1, _ = PEFT(A)
+#     slr["PEFT"].append(max(L[-1][2] for L in pi1.values())/lb)
+#     # print(max(L[-1][2] for L in pi1.values()))
+    
 # elapsed = timer() - start
 # print("Time taken: {}".format(elapsed))
     
@@ -61,13 +66,17 @@ print("HEFT length: {}".format(heft))
 # isdls = isdls_schedule.longest_path(method="S")
 # print("ISDLS length: {}".format(isdls))
 
-# rob_schedule = RobHEFT(T, alpha=45)
-# rob = rob_schedule.longest_path(method="S")
-# print("RobHEFT length: {}".format(rob))
+start = timer()
+rob_schedule = RobHEFT(T, alpha=45)
+elapsed = timer() - start
 
-mcs_schedule = MCS(T)
-mcs = mcs_schedule.longest_path(method="S")
-print("MCS length: {}".format(mcs))
+rob = rob_schedule.longest_path(method="S")
+print("RobHEFT length: {}".format(rob))
+print("Time taken: {}".format(elapsed))
+
+# mcs_schedule = MCS(T)
+# mcs = mcs_schedule.longest_path(method="S")
+# print("MCS length: {}".format(mcs))
 
 
 
