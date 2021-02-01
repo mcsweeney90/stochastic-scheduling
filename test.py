@@ -67,7 +67,7 @@ print("HEFT length: {}".format(heft))
 # print("ISDLS length: {}".format(isdls))
 
 start = timer()
-rob_schedule = RobHEFT(T, alpha=45)
+rob_schedule = RobHEFT(T, alpha=90)
 elapsed = timer() - start
 
 rob = rob_schedule.longest_path(method="S")

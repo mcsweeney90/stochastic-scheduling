@@ -10,6 +10,7 @@ import numpy as np
 import itertools as it
 from math import sqrt, radians, tan
 from psutil import virtual_memory
+from functools import partial
 # from scipy.stats import norm # TODO: really slow but NormalDist only available for version >= 3.8. What to do on Matt's machine?
 from statistics import NormalDist # TODO: see above, not available on Matt's machine.
 
@@ -75,8 +76,6 @@ class RV:
             return self.mu + self.sd
         elif avg_type in ["S", "SHEFT"]: 
             return self.mu + self.sd if self.mu > self.sd else self.mu + (self.sd/self.mu)
-        elif avg_type in ["SD", "sd"]: # TODO: for RobHEFT but necessary?
-            return self.sd
 
 class ADAG:
     """
@@ -248,6 +247,37 @@ class SDAG:
         self.top_sort = list(nx.topological_sort(self.graph))    # Often saves time.  
         self.size = len(self.top_sort)
         
+    def adjust_uncertainty(self, new_cov):
+        """
+        Modify the uncertainty (i.e., the variance) of all weights.
+        Assumes that mean (and initial variance values) are already set.
+        Useful for observing the effect of uncertainty on a computed schedule.
+
+        Parameters
+        ----------
+        new_cov : TYPE
+            DESCRIPTION.
+
+        Returns
+        -------
+        None.
+
+        """
+        for task in self.top_sort:
+            mu = self.graph.nodes[task]['weight'].mu
+            new_var = new_cov * mu # TODO: randomness?
+            new_sd = sqrt(new_var)
+            self.graph.nodes[task]['weight'].var = new_var
+            self.graph.nodes[task]['weight'].sd = new_sd
+            for child in self.graph.successors(task): 
+                if type(self.graph[task][child]['weight']) == float or type(self.graph[task][child]['weight']) == int:
+                    continue
+                mu = self.graph[task][child]['weight'].mu
+                new_var = new_cov * mu # TODO: randomness?
+                new_sd = sqrt(new_var)
+                self.graph[task][child]['weight'].var = new_var
+                self.graph[task][child]['weight'].sd = new_sd
+                        
     def CPM(self, variance=False):
         """
         TODO: check this meshes with everything else. Maybe rewrite with lambda functions rather than the try statements.
@@ -500,6 +530,7 @@ class TDAG:
                         sigma = random.uniform(0, 2*cov) * mu
                         self.graph[task][child]['weight'][(w, p)] = RV(mu, sigma**2)
                         
+                        
     def minimal_serial_time(self, mc_samples=1000):
         """
         Extension of minimal serial time for scalar graphs. 
@@ -569,43 +600,6 @@ class TDAG:
             return SDAG(A)
         
         raise ValueError("Invalid stochastic average type!")        
-                
-    # def get_averaged_graph(self, stochastic=False, avg_type="MEAN"):
-    #     """Return an equivalent graph with averaged weights."""
-        
-    #     # Copy the topology.
-    #     A = self.graph.__class__()
-    #     A.add_nodes_from(self.graph)
-    #     A.add_edges_from(self.graph.edges)
-        
-    #     # Scalar averages.
-    #     if not stochastic:
-    #         for t in self.top_sort:
-    #             A.nodes[t]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph.nodes[t]['weight'].items()}
-    #             for s in self.graph.successors(t):
-    #                 A[t][s]['weight'] = {}
-    #                 average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) 
-    #                 # TODO: above may no longer be necessary.
-    #                 A[t][s]['weight'] = {k : average(v) for k, v in self.graph[t][s]['weight'].items()} 
-    #         return ADAG(A)
-                
-    #     # Stochastic averages. TODO: check the edge means since changes to set_weights.
-    #     if avg_type in ["N", "NORMAL", "CLT"]:
-    #         L = len(self.graph.nodes[self.top_sort[0]]['weight'])
-    #         L2 = L*L
-    #         mean = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.mu
-    #         var = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.var
-    #         for t in self.top_sort:
-    #             m = sum(mean(r) for r in self.graph.nodes[t]['weight'].values()) # TODO: mean/var needed for nodes?
-    #             v = sum(var(r) for r in self.graph.nodes[t]['weight'].values())
-    #             A.nodes[t]['weight'] = RV(m, v)/L
-    #             for s in self.graph.successors(t):
-    #                 m1 = 2*sum(mean(r) for r in self.graph[t][s]['weight'].values())
-    #                 v1 = 2*sum(var(r) for r in self.graph[t][s]['weight'].values())
-    #                 A[t][s]['weight'] = RV(m1, v1)/L2
-    #         return SDAG(A)
-        
-    #     raise ValueError("Invalid stochastic average type!")
     
     def comm_cost(self, parent, child, source, dest):
         if source == dest:
@@ -664,10 +658,9 @@ class TDAG:
                             prio_function, 
                             selection_function,
                             insertion=False, 
-                            eval_method="S",
+                            eval_method="MC",
                             eval_dist="N",
-                            eval_samples=1000,
-                            alpha=45):
+                            eval_samples=1000):
         """
         TODO.
         Don't like e.g., needing alpha as a function.
@@ -680,10 +673,10 @@ class TDAG:
         S = self.graph.__class__()       
         
         # Simulate and find schedule.  
-        where, last = {}, {} # Helpers.
+        where, last = {}, {}    # Helpers.
         ready_tasks = [self.top_sort[0]] 
         while ready_tasks:
-            task = max(ready_tasks, key=prio_function) # TODO: what if min?
+            task = max(ready_tasks, key=prio_function)      # TODO: what if min?
             S.add_node(task)
             parents = list(self.graph.predecessors(task))
             for p in parents:
@@ -693,7 +686,6 @@ class TDAG:
                 
                 # Set schedule node weights. 
                 S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
-                # Same for edges.
                 for p in parents:
                     S[p][task]['weight'] = self.comm_cost(p, task, where[p], w)
                     
@@ -735,8 +727,7 @@ class TDAG:
                     S.remove_node("X")
                     
             # Select the "best" worker according to the specified method.
-            # chosen_worker = choose_worker(worker_makespans, alpha)
-            chosen_worker = selection_function(worker_makespans, alpha=alpha)
+            chosen_worker = selection_function(worker_makespans)
             # "Schedule" the task on chosen worker.
             where[task] = chosen_worker
             S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
@@ -828,7 +819,7 @@ def SSTAR(T, det_heuristic=HEFT, avg_type="MEAN", weighted=False, scalar_graph=N
 
 def SDLS(T, X=0.9, return_graph=True, insertion=None):
     """
-    TODO: Insertion doesn't seem to make much of a difference
+    TODO: Insertion doesn't seem to make much of a difference but evaluate this more thoroughly.
     TODO: Still may be too slow for large DAGs. Obviously copying graph etc is not optimal but those kind of things aren't the
     real bottlenecks.
     
@@ -942,7 +933,7 @@ def rob_selection(est_makespans, alpha=45):
     None.
 
     """     
-    # Filter the dominated workers.   
+    # Filter the dominated workers. This might be more expensive than it's worth given the size of the sets under consideration.  
     sorted_workers = list(sorted(est_makespans, key=lambda p : est_makespans[p].mu)) # Ascending order of expected value.
     dominated = [False] * len(sorted_workers)           
     for i, w in enumerate(sorted_workers):
@@ -964,13 +955,13 @@ def rob_selection(est_makespans, alpha=45):
     dist = lambda w : abs(line_end_pt * (nondominated[w].mu/mxm) - (nondominated[w].sd/mxs)) / sqrt(1 + line_end_pt**2)
     return min(nondominated, key=dist)    
 
-def RobHEFT(T, alpha=45, mc_samples=None):
+def RobHEFT(T, alpha=45, method="C", mc_dist="N", mc_samples=1000):
     """
     RobHEFT (HEFT with robustness) heuristic.
     'Evaluation and optimization of the robustness of DAG schedules in heterogeneous environments,'
     Canon and Jeannot (2010). 
-    TODO: this is a deliberately fairly slow implementation that places clarity above speed. May write a faster version if
-    it's ever necessary...
+    TODO: this is a deliberately fairly slow implementation that places clarity/re-use of existing code above speed. May write a 
+    faster version if it's ever necessary...
     """
     
     # Compute priorities.
@@ -980,90 +971,48 @@ def RobHEFT(T, alpha=45, mc_samples=None):
     # Get maximums for later normalization.
     mx_mu = ranks[T.top_sort[0]].mu
     mx_sd = max(ranks[t].sd for t in T.top_sort)     # Don't like this.
-    prio_function = lambda t : alpha*(ranks[t].mu/mx_mu) + (90-alpha)*(ranks[t].sd/mx_sd) 
+    prio_function = lambda t : alpha*(ranks[t].mu/mx_mu) + (90-alpha)*(ranks[t].sd/mx_sd)   
+    sel_function = partial(rob_selection, alpha=alpha)
+    return T.simulate_scheduling(priorities=ranks, prio_function=prio_function, 
+                                 selection_function=sel_function,
+                                 eval_method=method, eval_dist=mc_dist, eval_samples=mc_samples) 
+
+def ucb_selection(est_makespans, c):
+    """TODO."""
     
-    return T.simulate_scheduling(priorities=ranks, prio_function=prio_function, selection_function=rob_selection, alpha=alpha) # TODO: alpha.
+    scalar_conv = lambda w : est_makespans[w].mu + c * est_makespans[w].sd
+    return min(est_makespans, key=scalar_conv)
+    
+    
+def generic_priorities(T):
+    """TODO."""
+    return
+
+def generic_selection(est_makespans):
+    """TODO."""
+    return
+
+def GPS(T):
+    """
+    Generic priority scheduler.
+    Moving parts: - how priorities are computed.
+                  - how RV/ERC priority induces ordering.
+                  - processor selection.
+    """
+    
+    # Get ranks for all tasks.
+    ranks = {}
+    
+    # Functions for converting to scalar (if necessary).
+    
+    
+    
+    
+    return
     
     
 
-# def GGB(G, priorities=None, policy="EFT", insertion=False, eval_method="C"):
-#     """TODO. Schedule the list in order according to the policy."""
-    
-#     workers = list(G.graph.nodes[G.top_sort[0]]['weight'])
-    
-#     # Create and grow the schedule graph.
-#     S = G.graph.__class__() 
-    
-#     if priorities is not None:
-#         prios = priorities()
-#     else:
-#         prios = 0         
-    
-#     where, loads, last = {}, {}, {}
-#     for task in task_list:
-#         S.add_node(task)
-#         parents = list(self.graph.predecessors(task)) 
-#         for p in parents:
-#             S.add_edge(p, task)
-#         worker_makespans = {}
-#         for w in workers:
-#             # Set schedule node weights. TODO: add node instead?
-#             S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][w]
-#             # Same for edges.
-#             for p in parents:
-#                 S[p][task]['weight'] = self.comm_costs(p, task, where[p], w)
-            
-#             # Transitive edges. TODO: insertion.
-#             remove = False
-#             try:
-#                 L = last[w]
-#                 if not S.has_edge(L, task):
-#                     S.add_edge(L, task)
-#                     S[L][task]['weight'] = 0.0
-#                     remove = True
-#             except KeyError:
-#                 pass
-            
-#             # Possibly need to add single exit task.
-#             exit_tasks = [t for t in S if not len(list(S.successors(t)))]
-#             if len(exit_tasks) > 1:
-#                 S.add_node("X")
-#                 S.nodes["X"]['weight'] = RV(0.0, 0.0) # don't like.
-#                 for e in exit_tasks:
-#                     S.add_edge(e, "X")
-#                     S[e]["X"]['weight'] = 0.0 
-                
-#             # Evaluate the makespan.
-#             P = SDAG(S)
-#             worker_makespans[w] = P.longest_path(method=eval_method)
-            
-#             # Clean up - remove edge etc. TODO: need to set node weight to zero?
-#             if remove:
-#                 S.remove_edge(L, task)
-#             if len(exit_tasks) > 1:
-#                 S.remove_node("X")
-                
-#         # print(worker_makespans)
-#         # Select the "best" worker according to the aggregation/angle procedure.
-#         # chosen_worker = closest_worker(worker_makespans, a=a)
-#         chosen_worker = min(workers, key=lambda w:worker_makespans[w].mu)
-#         # print(chosen_worker)
-#         # "Schedule" the task on chosen worker.
-#         where[task] = chosen_worker
-#         S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
-#         # Same for edges.
-#         for p in parents:
-#             S[p][task]['weight'] = self.graph[p][task]['weight'][(where[p], chosen_worker)]
-#         try:
-#             L = last[chosen_worker]
-#             if not S.has_edge(L, task):
-#                 S.add_edge(L, task)
-#                 S[L][task]['weight'] = 0.0
-#         except KeyError:
-#             pass
-#         last[chosen_worker] = task
-            
-#     return SDAG(S) 
+
 
 def MCS(S, production_heuristic=HEFT, production_steps=100, threshold=0.2, dist="N", samples=1000):
     """ 
