@@ -134,7 +134,7 @@ class ADAG:
         else:
             return self.graph[parent][child]['weight'][(dest, source)] # symmetric.
     
-    def simulate_scheduling(self, priorities, policy="EFT", lookahead_table=None, return_assigment=True):
+    def list_scheduling(self, priorities, policy="EFT", lookahead_table=None, return_assigment=True):
         """
         Simulates the scheduling of the tasks in priority_list.
         """ 
@@ -653,17 +653,20 @@ class TDAG:
                     S[d][t]['weight'] = 0.0
         return SDAG(S) 
     
-    def simulate_scheduling(self, 
-                            priorities, 
-                            prio_function, 
-                            selection_function,
-                            insertion=False, 
-                            eval_method="MC",
-                            eval_dist="N",
-                            eval_samples=1000):
+    def list_scheduling(self, 
+                        priorities, 
+                        prio_function, 
+                        selection_function,
+                        insertion=False, 
+                        eval_method="MC",
+                        eval_dist="N",
+                        eval_samples=1000):
         """
-        TODO.
-        Don't like e.g., needing alpha as a function.
+        TODO. Insertion. Create ERV class?
+        Quite a few differences from the ADAG method:
+            1. Priorities are now assumed to be RVs/empirical RVs, so prio_function is needed to scalarize them (but in future might
+               want to do something else instead). 
+            2. 
         """
         
         # Get list of workers - often useful.
@@ -768,7 +771,7 @@ def HEFT(G, weighted=False):
     # Compute upward ranks.
     U = G.get_upward_ranks(weighted=weighted)
     # Simulate to get the schedule and return it.
-    return G.simulate_scheduling(priorities=U, policy="EFT")
+    return G.list_scheduling(priorities=U, policy="EFT")
 
 def PEFT(G):
     """
@@ -780,7 +783,7 @@ def PEFT(G):
     # Compute the ranks.
     ranks = {t : sum(OCT[t].values())/len(OCT[t].values()) for t in G.top_sort}     
     # Get schedule.
-    return G.simulate_scheduling(priorities=ranks, policy="PEFT", lookahead_table=OCT) 
+    return G.list_scheduling(priorities=ranks, policy="PEFT", lookahead_table=OCT) 
 
 # =============================================================================
 # STOCHASTIC HEURISTICS.
@@ -970,12 +973,15 @@ def RobHEFT(T, alpha=45, method="C", mc_dist="N", mc_samples=1000):
     ranks = R.CPM(variance=True)
     # Get maximums for later normalization.
     mx_mu = ranks[T.top_sort[0]].mu
-    mx_sd = max(ranks[t].sd for t in T.top_sort)     # Don't like this.
+    mx_sd = max(ranks[t].sd for t in T.top_sort)
     prio_function = lambda t : alpha*(ranks[t].mu/mx_mu) + (90-alpha)*(ranks[t].sd/mx_sd)   
     sel_function = partial(rob_selection, alpha=alpha)
-    return T.simulate_scheduling(priorities=ranks, prio_function=prio_function, 
-                                 selection_function=sel_function,
-                                 eval_method=method, eval_dist=mc_dist, eval_samples=mc_samples) 
+    return T.list_scheduling(priorities=ranks, 
+                             prio_function=prio_function,
+                             selection_function=sel_function,
+                             eval_method=method, 
+                             eval_dist=mc_dist, 
+                             eval_samples=mc_samples) 
 
 def ucb_selection(est_makespans, c):
     """TODO."""
@@ -983,16 +989,8 @@ def ucb_selection(est_makespans, c):
     scalar_conv = lambda w : est_makespans[w].mu + c * est_makespans[w].sd
     return min(est_makespans, key=scalar_conv)
     
-    
-def generic_priorities(T):
-    """TODO."""
-    return
 
-def generic_selection(est_makespans):
-    """TODO."""
-    return
-
-def GPS(T):
+def GLS(T, priorities="HEFT", prio_function="I", selection_function="UCB", c=0): # TODO.
     """
     Generic priority scheduler.
     Moving parts: - how priorities are computed.
@@ -1001,9 +999,33 @@ def GPS(T):
     """
     
     # Get ranks for all tasks.
-    ranks = {}
+    if priorities == "HEFT":
+        scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
+        prios = scalar_graph.get_upward_ranks()
+    elif priorities == "HEFT-WM":
+        scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
+        prios = scalar_graph.get_upward_ranks(weighted=True)
+    elif priorities == "UR-S":
+        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+        prios = avg_graph.get_upward_ranks(method="S") 
+    elif priorities == "UR-C":
+        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+        prios = avg_graph.get_upward_ranks(method="C") 
+    elif priorities == "UR-MC10":
+        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+        prios = avg_graph.get_upward_ranks(method="MC", mc_dist="N", mc_samples=10) # TODO: what dist?
+    #TODO: weighted average versions of above.    
+    
     
     # Functions for converting to scalar (if necessary).
+    if priorities in ["HEFT", "HEFT-WM"]:
+        p_function = lambda x : x
+    elif prio_function == "UCB":
+        p_function = lambda r : r.mu + c * r.sd
+    
+    
+    
+    
     
     
     
