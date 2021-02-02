@@ -9,21 +9,6 @@ Ground rules: 1. No spoilation.
 
 # First, just use the standard HEFT upward ranking.
 
-# =============================================================================
-# Different priorities
-# =============================================================================
-
-"""
-Options.
-1. Standard HEFT scalar mean values.
-2. HEFT-WM.
-Multiple different stochastic upward ranks (standard averaged graph):
-3. Sculli's method.
-4. CorLCA.
-5. MC with different numbers of samples and distributions.
-Weighted average graph. Different ways to weight?
-"""
-
 
 # =============================================================================
 # Priority functions.

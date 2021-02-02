@@ -56,26 +56,6 @@ class RV:
     def __floordiv__(self, c): 
         return RV(self.mu / c, self.var / (c * c))
     __rfloordiv__ = __floordiv__     
-    def reset(self):
-        """Set all attributes to their defaults."""
-        self.mu, self.var, self.sd = 0.0, 0.0, 0.0    
-    def realize(self, dist):
-        if dist in ["N", "NORMAL", "normal"]:    
-            r = random.gauss(self.mu, self.sd)    # Faster than numpy for individual realizations.         
-            return r if r > 0.0 else -r
-        elif dist in ["G", "GAMMA", "gamma"]:
-            return random.gammavariate(alpha=(self.mu**2/self.var), beta=self.var/self.mu)      
-        elif dist in ["U", "UNIFORM", "uniform"]:
-            u = sqrt(3) * self.sd
-            r = self.mu + random.uniform(-u, u)                
-            return r if r > 0.0 else -r 
-    def average(self, avg_type="MEAN"):
-        if avg_type in ["M", "MEAN"]:
-            return self.mu
-        elif avg_type in ["U", "UCB"]:
-            return self.mu + self.sd
-        elif avg_type in ["S", "SHEFT"]: 
-            return self.mu + self.sd if self.mu > self.sd else self.mu + (self.sd/self.mu)
 
 class ADAG:
     """
@@ -96,10 +76,9 @@ class ADAG:
         return len(self.graph.nodes[task]['weight']) / s 
     
     def edge_mean(self, parent, child, weighted=False):
-        """TODO: update, changes to edge weights."""
+        """TODO."""
         if not weighted:
             return 2 * sum(self.graph[parent][child]['weight'].values()) / len(self.graph.nodes[parent]['weight'])**2
-            # return sum(self.graph[parent][child]['weight'].values())/len(self.graph[parent][child]['weight']) 
         s1 = sum(1/v for v in self.graph.nodes[parent]['weight'].values())
         s2 = sum(1/v for v in self.graph.nodes[child]['weight'].values())
         cbar = 0.0
@@ -107,7 +86,7 @@ class ADAG:
             t_w = self.graph.nodes[parent]['weight'][k[0]]
             c_w = self.graph.nodes[child]['weight'][k[1]]             
             cbar += v/(t_w * c_w) 
-        cbar *= 2 # TODO: check.
+        cbar *= 2 
         cbar /= (s1 * s2)
         return cbar 
         
@@ -418,7 +397,7 @@ class SDAG:
                             m, s = self.graph[p][t]['weight'].mu, self.graph[p][t]['weight'].sd
                             if mc_dist in ["N", "NORMAL", "normal"]: 
                                 e = np.random.normal(m, s, mc_samples)
-                                e = abs(np.random.normal(m, s, mc_samples))
+                                # e = abs(np.random.normal(m, s, mc_samples))
                             elif mc_dist in ["G", "GAMMA", "gamma"]:
                                 v = self.graph[p][t]['weight'].var
                                 sh, sc = (m * m)/v, v/m
@@ -426,7 +405,7 @@ class SDAG:
                             elif mc_dist in ["U", "UNIFORM", "uniform"]:
                                 u = sqrt(3) * s
                                 e = np.random.uniform(-u + m, u + m, mc_samples)  
-                                e = abs(np.random.uniform(-u + m, u + m, mc_samples))
+                                # e = abs(np.random.uniform(-u + m, u + m, mc_samples))
                             pmatrix.append(np.add(L[p], e))
                         except AttributeError:
                             pmatrix.append(L[p])
@@ -546,7 +525,7 @@ class TDAG:
             realizations.append(r)
         return list(np.amin(realizations, axis=0))
     
-    def get_scalar_graph(self, kind="AVERAGE", avg_type="MEAN", real_dist="GAMMA"):
+    def get_scalar_graph(self, scal_func=lambda r : r.mu):
         """Return an ADAG object..."""
         
         # Copy the topology.
@@ -555,19 +534,13 @@ class TDAG:
         A.add_edges_from(self.graph.edges)
         
         # Set the weights.
-        # edge_average = lambda r : 0.0 if (type(r) == float or type(r) == int) else r.average(avg_type=avg_type) # TODO: needed (also real one)?
         for t in self.top_sort:
             # Set node weights.
-            if kind in ["A", "AVERAGE", "average"]:
-                A.nodes[t]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph.nodes[t]['weight'].items()}
-            elif kind in ["R", "REALIZATION", "REAL", "realization", "real"]:
-                A.nodes[t]['weight'] = {k : v.realize(dist=real_dist) for k, v in self.graph.nodes[t]['weight'].items()}
+            A.nodes[t]['weight'] = {k : scal_func(v) for k, v in self.graph.nodes[t]['weight'].items()}
             # Set edge weights.
             for s in self.graph.successors(t):
-                if kind in ["A", "AVERAGE", "average"]:                    
-                    A[t][s]['weight'] = {k : v.average(avg_type=avg_type) for k, v in self.graph[t][s]['weight'].items()}
-                elif kind in ["R", "REALIZATION", "REAL", "realization", "real"]:                
-                    A[t][s]['weight'] = {k : v.realize(dist=real_dist) for k, v in self.graph[t][s]['weight'].items()} 
+                A[t][s]['weight'] = {k : scal_func(v) for k, v in self.graph[t][s]['weight'].items()}
+                
         # Return ADAG object.      
         return ADAG(A)
     
@@ -666,7 +639,7 @@ class TDAG:
         Quite a few differences from the ADAG method:
             1. Priorities are now assumed to be RVs/empirical RVs, so prio_function is needed to scalarize them (but in future might
                want to do something else instead). 
-            2. 
+            2. Similarly for selection function.
         """
         
         # Get list of workers - often useful.
@@ -716,7 +689,7 @@ class TDAG:
                 # worker_makespans[w] = SDAG(S).longest_path(method=eval_method, mc_dist=eval_dist, mc_samples=eval_samples) # TODO.
                 P = SDAG(S)
                 if eval_method in ["MC", "mc"]:
-                    worker_dist = P.longest_path(method="MC", mc_dist=eval_dist, mc_samples=eval_samples) # TODO: 
+                    worker_dist = P.longest_path(method="MC", mc_dist=eval_dist, mc_samples=eval_samples) # TODO: ERV class. 
                     m = sum(worker_dist)/len(worker_dist)
                     v = np.var(worker_dist)
                     worker_makespans[w] = RV(m, v)
@@ -730,7 +703,8 @@ class TDAG:
                     S.remove_node("X")
                     
             # Select the "best" worker according to the specified method.
-            chosen_worker = selection_function(worker_makespans)
+            # TODO: used this syntax rather than e.g., min(mkspans, key=sel_function) to allow for more complex possibilities.
+            chosen_worker = selection_function(worker_makespans)    
             # "Schedule" the task on chosen worker.
             where[task] = chosen_worker
             S.nodes[task]['weight'] = self.graph.nodes[task]['weight'][chosen_worker]
@@ -789,10 +763,9 @@ def PEFT(G):
 # STOCHASTIC HEURISTICS.
 # =============================================================================
 
-def SSTAR(T, det_heuristic=HEFT, avg_type="MEAN", weighted=False, scalar_graph=None):
+def SSTAR(T, det_heuristic, scal_func=lambda r : r.mu, scalar_graph=None):
     """
-    TODO: don't like passing weighted as an argument - what to do in general?
-    Converts a TDAG S to an "averaged" ADAG object based on avg_type, then applies det_heuristic to it. 
+    Converts a TDAG S to a "scalarized" ADAG object using scal_func, then applies det_heuristic to it. 
     When avg_type == "MEAN" and det_heuristic == HEFT, this is just HEFT applied to the stochastic graph.
     When avg_type == "SHEFT" and det_heuristic == HEFT, this is the Stochastic HEFT (SHEFT) heuristic.        
     'A stochastic scheduling algorithm for precedence constrained tasks on Grid',
@@ -813,9 +786,9 @@ def SSTAR(T, det_heuristic=HEFT, avg_type="MEAN", weighted=False, scalar_graph=N
     """
     # Convert to an "averaged" graph with scalar weights (if necessary).
     if scalar_graph is None:
-        scalar_graph = T.get_scalar_graph(kind="A", avg_type=avg_type)
+        scalar_graph = T.get_scalar_graph(scal_func=scal_func)
     # Apply the chosen heuristic.
-    P, where = det_heuristic(scalar_graph, weighted=weighted) 
+    P, where = det_heuristic(scalar_graph) 
     # Convert fullahead schedule to its (stochastic) disjunctive graph and return.
     return T.schedule_to_graph(schedule=P, where_scheduled=where)
     
@@ -920,6 +893,9 @@ def SDLS(T, X=0.9, return_graph=True, insertion=None):
     # Else return schedule only.
     return schedule  
 
+def filter_dominated(R):
+    return
+
 def rob_selection(est_makespans, alpha=45):
     """
     Helper function for RobHEFT.
@@ -981,60 +957,38 @@ def RobHEFT(T, alpha=45, method="C", mc_dist="N", mc_samples=1000):
                              selection_function=sel_function,
                              eval_method=method, 
                              eval_dist=mc_dist, 
-                             eval_samples=mc_samples) 
+                             eval_samples=mc_samples)     
 
-def ucb_selection(est_makespans, c):
-    """TODO."""
+# def GLS(T, priorities="HEFT", prio_function="I", selection_function="UCB"): 
+#     """
+#     Generic priority scheduler.
+#     Moving parts: - how priorities are computed.
+#                   - how RV/ERC priority induces ordering.
+#                   - processor selection.
+#     """
     
-    scalar_conv = lambda w : est_makespans[w].mu + c * est_makespans[w].sd
-    return min(est_makespans, key=scalar_conv)
+#     # Get ranks for all tasks.
+#     if priorities == "HEFT":
+#         scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
+#         prios = scalar_graph.get_upward_ranks()
+#     elif priorities == "HEFT-WM":
+#         scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
+#         prios = scalar_graph.get_upward_ranks(weighted=True)
+#     elif priorities == "UR-S":
+#         avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+#         prios = avg_graph.get_upward_ranks(method="S") 
+#     elif priorities == "UR-C":
+#         avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+#         prios = avg_graph.get_upward_ranks(method="C") 
+#     elif priorities == "UR-MC10":
+#         avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
+#         prios = avg_graph.get_upward_ranks(method="MC", mc_dist="N", mc_samples=10) # TODO: what dist?
+#     #TODO: weighted average versions of above.    
+        
     
-
-def GLS(T, priorities="HEFT", prio_function="I", selection_function="UCB", c=0): # TODO.
-    """
-    Generic priority scheduler.
-    Moving parts: - how priorities are computed.
-                  - how RV/ERC priority induces ordering.
-                  - processor selection.
-    """
-    
-    # Get ranks for all tasks.
-    if priorities == "HEFT":
-        scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
-        prios = scalar_graph.get_upward_ranks()
-    elif priorities == "HEFT-WM":
-        scalar_graph = T.get_scalar_graph(kind="A", avg_type="MEAN")
-        prios = scalar_graph.get_upward_ranks(weighted=True)
-    elif priorities == "UR-S":
-        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
-        prios = avg_graph.get_upward_ranks(method="S") 
-    elif priorities == "UR-C":
-        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
-        prios = avg_graph.get_upward_ranks(method="C") 
-    elif priorities == "UR-MC10":
-        avg_graph = T.get_averaged_graph(avg_type="NORMAL")   
-        prios = avg_graph.get_upward_ranks(method="MC", mc_dist="N", mc_samples=10) # TODO: what dist?
-    #TODO: weighted average versions of above.    
+#     return
     
     
-    # Functions for converting to scalar (if necessary).
-    if priorities in ["HEFT", "HEFT-WM"]:
-        p_function = lambda x : x
-    elif prio_function == "UCB":
-        p_function = lambda r : r.mu + c * r.sd
-    
-    
-    
-    
-    
-    
-    
-    
-    return
-    
-    
-
-
 
 def MCS(S, production_heuristic=HEFT, production_steps=100, threshold=0.2, dist="N", samples=1000):
     """ 
@@ -1044,19 +998,27 @@ def MCS(S, production_heuristic=HEFT, production_steps=100, threshold=0.2, dist=
     TODO: seems to work but almost never overrules HEFT - bug somewhere or just parameters/graph instances?
     """
     
+    if dist in ["N", "NORMAL", "normal"]:
+        real_func = lambda r : abs(random.gauss(r.mu, r.sd)) # TODO: abs?
+    elif dist in ["G", "GAMMA", "gamma"]:
+        real_func = lambda r : random.gammavariate(alpha=(r.mu**2/r.var), beta=r.var/r.mu)
+    elif dist in ["U", "UNIFORM", "uniform"]:
+        real_func = lambda r : abs(random.uniform(r.mu - sqrt(3)*r.sd, r.mu + sqrt(3)*r.sd)) # TODO: abs?
+    
     # Create schedule list.
     L = []
     
     # Get the standard HEFT schedule.
-    avg_graph = S.get_scalar_graph(kind="A", avg_type="MEAN")
+    avg_graph = S.get_scalar_graph() # TODO: specify mean values?
     mean_static_schedule, where = production_heuristic(avg_graph) 
     omega_mean = S.schedule_to_graph(schedule=mean_static_schedule, where_scheduled=where)
-    qualify_check = omega_mean.CPM()[S.top_sort[-1]] * (1 + threshold) # TODO. Think this works but verify. Dynamically updated in 
+    qualify_check = omega_mean.CPM()[S.top_sort[-1]] * (1 + threshold) # TODO. Think this works but verify. Dynamically updated in paper. 
     L.append(omega_mean)
     
     # Production step.
     for _ in range(production_steps):
-        G = S.get_scalar_graph(kind="R", real_dist=dist) 
+        # G = S.get_scalar_graph(kind="R", real_dist=dist) 
+        G = S.get_scalar_graph(scal_func=real_func)
         static_schedule, where = production_heuristic(G)
         omega = S.schedule_to_graph(schedule=static_schedule, where_scheduled=where)
         # if all(omega.graph.edges != pi.graph.edges for pi in L): # TODO: doesn't work, override comparator for SDAGs? 
@@ -1067,7 +1029,7 @@ def MCS(S, production_heuristic=HEFT, production_steps=100, threshold=0.2, dist=
     # print(len(L))
     # Evaluate the makespan distributions of the candidiate schedules.
     makespans = {pi : pi.longest_path(method="MC", mc_dist=dist, mc_samples=samples) for pi in L}  
-    # print(list(sum(makespans[pi])/len(makespans[pi]) for pi in L))
+    print(list(sum(makespans[pi])/len(makespans[pi]) for pi in L))
     return min(L, key=lambda pi : sum(makespans[pi])/len(makespans[pi]))    
     
 

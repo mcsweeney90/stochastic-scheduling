@@ -7,6 +7,7 @@ Test script.
 import os, dill
 import numpy as np
 from timeit import default_timer as timer
+from functools import partial
 from src import RV, SSTAR, SDLS, RobHEFT, HEFT, MCS, PEFT
 
 size = 100
@@ -37,22 +38,34 @@ stg_dag_path = 'graphs/STG/{}'.format(size)
     
 with open('{}/147.dill'.format(stg_dag_path), 'rb') as file:
     T = dill.load(file)
-T.set_weights(n_processors=4, cov=0.2) 
+T.set_weights(n_processors=4, cov=0.5) 
 
 # mst = T.minimal_serial_time(mc_samples=100000)
 # print("MST: RV(mu = {}, var = {})".format(sum(mst)/len(mst), np.var(mst)))
 
-heft_schedule = SSTAR(T, weighted=False)
+heft_schedule = SSTAR(T, det_heuristic=HEFT)
 heft = heft_schedule.longest_path(method="S")
 print("HEFT length: {}".format(heft))
 
-# wheft_schedule = SSTAR(T, weighted=True)
+# heft_schedule = SSTAR1(T, det_heuristic=HEFT)
+# heft = heft_schedule.longest_path(method="S")
+# print("HEFT length: {}".format(heft))
+
+# HEFT_WM = partial(HEFT, weighted=True)
+# wheft_schedule = SSTAR(T, det_heuristic=HEFT_WM)
 # wheft = wheft_schedule.longest_path(method="S")
 # print("WHEFT length: {}".format(wheft))
 
-# sheft_schedule = SSTAR(T, avg_type="SHEFT", weighted=False)
+# sheft_schedule = SSTAR(T, det_heuristic=HEFT, avg_type="SHEFT")
 # sheft = sheft_schedule.longest_path(method="S")
 # print("SHEFT length: {}".format(sheft))
+
+# s_func = lambda r : r.mu + r.sd if r.mu > r.sd else r.mu + (r.sd/r.mu)
+# sheft_schedule = SSTAR1(T, det_heuristic=HEFT, scal_func=s_func)
+# sheft = sheft_schedule.longest_path(method="S")
+# print("SHEFT length: {}".format(sheft))
+
+
 
 # wsheft_schedule = SSTAR(T, avg_type="SHEFT", weighted=True)
 # wsheft = wsheft_schedule.longest_path(method="S")
@@ -66,17 +79,17 @@ print("HEFT length: {}".format(heft))
 # isdls = isdls_schedule.longest_path(method="S")
 # print("ISDLS length: {}".format(isdls))
 
-start = timer()
-rob_schedule = RobHEFT(T, alpha=90)
-elapsed = timer() - start
+# start = timer()
+# rob_schedule = RobHEFT(T, alpha=90)
+# elapsed = timer() - start
 
-rob = rob_schedule.longest_path(method="S")
-print("RobHEFT length: {}".format(rob))
-print("Time taken: {}".format(elapsed))
+# rob = rob_schedule.longest_path(method="S")
+# print("RobHEFT length: {}".format(rob))
+# print("Time taken: {}".format(elapsed))
 
-# mcs_schedule = MCS(T)
-# mcs = mcs_schedule.longest_path(method="S")
-# print("MCS length: {}".format(mcs))
+mcs_schedule = MCS(T)
+mcs = mcs_schedule.longest_path(method="S")
+print("MCS length: {}".format(mcs))
 
 
 
